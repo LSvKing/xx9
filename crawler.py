@@ -516,52 +516,82 @@ FALLBACK_DOMAINS = [
 
 
 def update_config():
-    """更新 token/域名 到 config.json"""
+    """更新 token/域名 到 config.json - 自动从 app.js 提取所有域名"""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
+    frontend = cfg.get("frontend", "https://rw345o29u6ivj.xyz")
 
-    # 待测域名列表
-    domains = [cfg.get("api_base", API_BASE)] if cfg.get("api_base") else []
-    domains += [d for d in FALLBACK_DOMAINS if d not in domains]
+    # 1. 从前端页面下载 app.js 提取所有域名
+    print(f"从 {frontend} 提取域名列表...")
+    domains = set()
+    try:
+        html = requests.get(f"{frontend}/enter", timeout=10,
+                            headers={"user-agent": "Mozilla/5.0"}).text
+        js_url = re.search(r'src="([^"]*app[^"]*\.js)"', html)
+        if js_url:
+            js_full = js_url.group(1)
+            if not js_full.startswith("http"):
+                js_full = frontend + "/" + js_full.lstrip("./")
+            print(f"  下载 app.js: {js_full}")
+            js_code = requests.get(js_full, timeout=15).text
+            domains.update(re.findall(r'https?://[a-zA-Z0-9.-]+\.(?:xyz|top)', js_code))
+    except Exception as e:
+        print(f"  提取失败: {e}")
 
+    # 2. 加上 api.子域名变体
+    api_variants = set()
+    for d in list(domains):
+        host = re.sub(r'https?://', '', d)
+        api_variants.add(f"https://api.{host}")
+        # 也去掉前缀子域名试
+        if not host.startswith('api.'):
+            api_variants.add(f"https://api.{host}")
+    domains.update(api_variants)
+
+    print(f"  共 {len(domains)} 个待测域名")
+
+    # 3. 逐个测试
     found = False
-    for domain in domains:
-        url = f"{domain}/fast-endecode/main/request"
-        print(f"检测: {domain} ...", end=" ", flush=True)
+    for domain in sorted(domains):
+        print(f"  检测: {domain} ...", end=" ", flush=True)
         try:
             ts = int(time.time() * 1000)
             key = KEYS[ts % 10]
             bp = json.dumps({"method": 1, "params": {}, "uri": "app/jwt-token"}, separators=(",", ":"))
             c = AES.new(key.encode(), AES.MODE_ECB)
             ed = base64.b64encode(c.encrypt(pad(bp.encode(), 16))).decode()
-            resp = requests.post(url, json={"data": ed, "time": ts}, timeout=10,
-                                 headers={"accept": "application/json", "user-agent": "Mozilla/5.0"})
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("data"):
-                    rk = KEYS[data["time"] % 10]
-                    c2 = AES.new(rk.encode(), AES.MODE_ECB)
-                    inner = json.loads(unpad(c2.decrypt(base64.b64decode(data["data"])), 16))
-                    token = inner.get("accessToken") or inner.get("jwtToken")
-                    if token:
-                        print("OK")
-                        cfg["api_base"] = domain
-                        cfg["jwt_token"] = token
-                        cfg["access_token"] = inner.get("accessToken", "")
-                        found = True
-                        break
+            resp = requests.post(
+                f"{domain}/fast-endecode/main/request",
+                json={"data": ed, "time": ts}, timeout=10,
+                headers={"accept": "application/json", "origin": frontend,
+                         "user-agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and resp.json().get("data"):
+                d = resp.json()
+                rk = KEYS[d["time"] % 10]
+                c2 = AES.new(rk.encode(), AES.MODE_ECB)
+                inner = json.loads(unpad(c2.decrypt(base64.b64decode(d["data"])), 16))
+                token = inner.get("accessToken") or inner.get("jwtToken")
+                if token:
+                    print("✅")
+                    cfg["api_base"] = domain
+                    cfg["jwt_token"] = token
+                    cfg["access_token"] = inner.get("accessToken", "")
+                    found = True
+                    break
             print(f"HTTP {resp.status_code}")
+        except requests.Timeout:
+            print("超时")
         except Exception as e:
-            print(f"失败 ({e})")
+            print(f"失败 ({str(e)[:50]})")
 
     if found:
         with open(config_path, "w") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         print(f"\n已更新 config.json:")
-        print(f"  api_base: {cfg['api_base']}")
+        print(f"  api_base:  {cfg['api_base']}")
         print(f"  jwt_token: {cfg['jwt_token'][:50]}...")
     else:
-        print("\n所有域名均不可用，请手动更新 config.json")
+        print("\n所有域名均不可用，请检查网络或手动更新 config.json")
 
 
 def main():
