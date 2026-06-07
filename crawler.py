@@ -2,8 +2,8 @@
 """
 主播视频爬虫 - SQLite 版本
 用法:
-  python crawler.py --all -p 5000             # 全站抓取列表
-  python crawler.py --all -p 5000 --detail    # 全站抓取列表+详情
+  python crawler.py --all                    # 全站抓取列表
+  python crawler.py --all --detail           # 全站抓取列表+详情
   python crawler.py -t 动漫 -p 10             # 按标签爬列表
   python crawler.py -t 动漫 -p 10 --detail    # 按标签爬列表+详情
   python crawler.py --download                # 下载所有未下载视频
@@ -296,12 +296,12 @@ def crawl_list(db: DB, tag: str, max_pages: int):
     print(f"[{tag}] 完成! 共 {db.count_items()} 条")
 
 
-def crawl_all(db: DB, max_pages: int):
-    """全站抓取 - 无关键词搜索（支持真正翻页）"""
+def crawl_all(db: DB):
+    """全站抓取 - 无关键词搜索，跑到无数据为止"""
     tag = "__all__"
     prog = db.get_progress(tag)
     page = prog["page"] + 1
-    while page <= max_pages:
+    while True:
         try:
             result = api_call("cms/vod/search", method=2, params={
                 "wd": "", "page": page, "pageSize": PAGE_SIZE,
@@ -323,7 +323,7 @@ def crawl_all(db: DB, max_pages: int):
                 db.insert_item(item)
         collected = db.count_items()
         db.set_progress(tag, page, total, collected)
-        print(f"[全站] 第{page}/{max_pages}页 新增{new_count}条 累计{collected}/{total} 进度{collected*100//max(total,1)}%")
+        print(f"[全站] 第{page}页 新增{new_count}条 累计{collected}/{total} 进度{collected*100//max(total,1)}%")
         if len(items) < PAGE_SIZE:
             break
         page += 1
@@ -407,7 +407,7 @@ def main():
     parser.add_argument("-d", "--detail-id", help="爬取单个详情")
     parser.add_argument("--detail", action="store_true", help="爬完列表后继续爬详情")
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
-    parser.add_argument("--all", action="store_true", help="全站抓取（推荐列表）")
+    parser.add_argument("--all", action="store_true", help="全站抓取")
     args = parser.parse_args()
 
     db = DB()
@@ -424,7 +424,7 @@ def main():
             return
 
         if args.all:
-            crawl_all(db, args.pages)
+            crawl_all(db)
             if args.detail:
                 crawl_details(db, "__all__")
             return
@@ -441,7 +441,8 @@ def main():
             print(f"已收集: {db.count_items()} 列表项, {db.count_details()} 详情, {db.count_downloaded()} 已下载")
             print()
             print("阶段1 - 爬取信息:")
-            print("  python crawler.py --all -p 5000              # 全站抓取")
+            print("  python crawler.py --all                         # 全站抓取")
+            print("  python crawler.py --all --detail                # 全站抓取+详情")
             print("  python crawler.py -t <标签> -p <页数>            # 按标签爬")
             print("  python crawler.py -t <标签> -p <页数> --detail   # 爬列表+详情")
             print()
