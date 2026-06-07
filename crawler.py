@@ -31,21 +31,41 @@ import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-API_BASE = "https://api.1d1bzspqmi46l.xyz"
+# ============================================================
+# 配置 - 从 config.json 读取，不存在则用默认值
+# ============================================================
+def _load_config():
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    defaults = {
+        "api_base": "https://api.1d1bzspqmi46l.xyz",
+        "frontend": "https://rw345o29u6ivj.xyz",
+        "media_base": "https://rr.rxjhwl.com",
+        "access_token": "",
+        "jwt_token": "",
+        "keys": [
+            "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
+            "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
+            "T0RVp7KIPamrtQ33", "8HbPxhX6fjhhhwok", "ugvseZc5Kkj8ecmV",
+            "G7i3OPcfNhBnAYpc",
+        ],
+    }
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            cfg = json.load(f)
+        for k in defaults:
+            if k in cfg and cfg[k]:
+                defaults[k] = cfg[k]
+    return defaults
+
+_cfg = _load_config()
+API_BASE = _cfg["api_base"]
 API_PATH = "/fast-endecode/main/request"
-FRONTEND = "https://by2uvofj99p0gf.xyz"
-MEDIA_BASE = "https://rr.rxjhwl.com"
+FRONTEND = _cfg["frontend"]
+MEDIA_BASE = _cfg["media_base"]
 DB_PATH = "output/crawler.db"
-
-ACCESS_TOKEN = "FDY7OBOZ926VQGT3A189EZZKOWJ5GBHP"
-JWT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhZHNDb2RlIjoiREZIIiwic2l0ZUlkIjoxLCJleHAiOjE3ODA5NDc2MTF9.NzdGaKF7GjYKpKPuonXAzmr7nmU9lijtFRIw7VnF85M"
-
-KEYS = [
-    "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
-    "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
-    "T0RVp7KIPamrtQ33", "8HbPxhX6fjhhhwok", "ugvseZc5Kkj8ecmV",
-    "G7i3OPcfNhBnAYpc",
-]
+ACCESS_TOKEN = _cfg["access_token"]
+JWT_TOKEN = _cfg["jwt_token"]
+KEYS = _cfg["keys"]
 
 PAGE_SIZE = 20
 
@@ -361,29 +381,39 @@ def crawl_details(db: DB, tag: str, workers: int = 5):
 
     todo = [dict(r) for r in rows]
     if not todo:
-        print(f"[{tag}] 详情已全部爬取")
+        print(f"详情已全部爬取")
         return
 
-    print(f"[{tag}] 待爬详情: {len(todo)} 条, 并发: {workers}")
+    total = len(todo)
+    print(f"待爬详情: {total} 条, 并发: {workers}")
 
-    done_count = [0]  # mutable counter for thread safety
-    error_count = [0]
-    lock = threading.Lock()
+    done = [0]; err = [0]; lock = threading.Lock()
+    active = [0]  # 当前活跃线程数
+    start = time.time()
 
     def fetch_one(row):
         vid = row["id"]
+        with lock:
+            active[0] += 1
         try:
             data = api_call(f"cms/vod/detail/{vid}", method=1)
             db.insert_detail(data)
             with lock:
-                done_count[0] += 1
-                if done_count[0] % 50 == 0:
-                    print(f"  已爬 {done_count[0]}/{len(todo)} ({error_count[0]} err)")
+                done[0] += 1
+                active[0] -= 1
+                n = done[0] + err[0]
+                elapsed = time.time() - start
+                rate = n / elapsed if elapsed > 0 else 0
+                eta = (total - n) / rate if rate > 0 else 0
+                print(f"\r  [{n}/{total}] {n*100//total}% | {rate:.1f}条/s | 活跃{active[0]} | ETA {eta:.0f}s  ", end="", flush=True)
             return True
         except Exception:
             with lock:
-                error_count[0] += 1
-            time.sleep(2)
+                err[0] += 1
+                active[0] -= 1
+                n = done[0] + err[0]
+                print(f"\r  [{n}/{total}] {n*100//total}% | err={err[0]}                                    ", flush=True)
+            time.sleep(1)
             return False
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -391,7 +421,8 @@ def crawl_details(db: DB, tag: str, workers: int = 5):
         for _ in as_completed(futures):
             pass
 
-    print(f"[{tag}] 详情完成! 成功 {done_count[0]}, 失败 {error_count[0]}, 共 {db.count_details()} 条")
+    elapsed = time.time() - start
+    print(f"\n详情完成! 成功 {done[0]}, 失败 {err[0]}, 共 {db.count_details()} 条, 耗时 {elapsed:.0f}s")
 
 
 def download_videos(db: DB, workers: int = 3):
@@ -458,6 +489,81 @@ def download_videos(db: DB, workers: int = 3):
     print(f"下载完成! 成功 {done_count[0]}, 失败 {fail_count[0]}, 共 {db.count_downloaded()} 已下载")
 
 
+# 备用 API 域名列表（从 app.js 中提取，自动尝试）
+FALLBACK_DOMAINS = [
+    "https://api.1d1bzspqmi46l.xyz",
+    "https://0ncp0kjmhys5dzj.xyz",
+    "https://5z3ffttoao467bc.xyz",
+    "https://6qdy0xioq0d39hm.xyz",
+    "https://c6sukj22g0f6zg7.xyz",
+    "https://co2rwy7os281b0e.xyz",
+    "https://ep3wmwhk45uhmx9.xyz",
+    "https://fezpo48v7eod18x.xyz",
+    "https://gdkm8yb00u3rxdm.xyz",
+    "https://k4byju9ljsh8aza.xyz",
+    "https://k4irke3n6xcwdpc.xyz",
+    "https://1cjvr80fr3f7.xyz",
+    "https://93l9cunfmoc1.xyz",
+    "https://6rl8a5qg0y7m.xyz",
+    "https://p9nwmo3jdquv.xyz",
+    "https://5idytkrilig6.xyz",
+    "https://y9ao7140l9ui.xyz",
+    "https://k5p0vw2fgfvc.xyz",
+    "https://mr5qvcc0k438.xyz",
+    "https://agnuprlu6fhz.xyz",
+    "https://ak8ib5fyxtww.xyz",
+]
+
+
+def update_config():
+    """更新 token/域名 到 config.json"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
+
+    # 待测域名列表
+    domains = [cfg.get("api_base", API_BASE)] if cfg.get("api_base") else []
+    domains += [d for d in FALLBACK_DOMAINS if d not in domains]
+
+    found = False
+    for domain in domains:
+        url = f"{domain}/fast-endecode/main/request"
+        print(f"检测: {domain} ...", end=" ", flush=True)
+        try:
+            ts = int(time.time() * 1000)
+            key = KEYS[ts % 10]
+            bp = json.dumps({"method": 1, "params": {}, "uri": "app/jwt-token"}, separators=(",", ":"))
+            c = AES.new(key.encode(), AES.MODE_ECB)
+            ed = base64.b64encode(c.encrypt(pad(bp.encode(), 16))).decode()
+            resp = requests.post(url, json={"data": ed, "time": ts}, timeout=10,
+                                 headers={"accept": "application/json", "user-agent": "Mozilla/5.0"})
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("data"):
+                    rk = KEYS[data["time"] % 10]
+                    c2 = AES.new(rk.encode(), AES.MODE_ECB)
+                    inner = json.loads(unpad(c2.decrypt(base64.b64decode(data["data"])), 16))
+                    token = inner.get("accessToken") or inner.get("jwtToken")
+                    if token:
+                        print("OK")
+                        cfg["api_base"] = domain
+                        cfg["jwt_token"] = token
+                        cfg["access_token"] = inner.get("accessToken", "")
+                        found = True
+                        break
+            print(f"HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"失败 ({e})")
+
+    if found:
+        with open(config_path, "w") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print(f"\n已更新 config.json:")
+        print(f"  api_base: {cfg['api_base']}")
+        print(f"  jwt_token: {cfg['jwt_token'][:50]}...")
+    else:
+        print("\n所有域名均不可用，请手动更新 config.json")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--tag", help="标签名")
@@ -467,11 +573,16 @@ def main():
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
     parser.add_argument("--all", action="store_true", help="全站抓取")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
+    parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
     args = parser.parse_args()
 
     db = DB()
 
     try:
+        if args.update:
+            update_config()
+            return
+
         if args.detail_id:
             data = api_call(f"cms/vod/detail/{args.detail_id}", method=1)
             db.insert_detail(data)
