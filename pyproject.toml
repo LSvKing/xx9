@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
     "pycryptodome>=3.19",
+    "playwright>=1.60.0",
 ]
 
 [tool.uv]
