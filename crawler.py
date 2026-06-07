@@ -6,12 +6,14 @@
 	uv sync
 
 运行:
-	uv run python crawler.py --all
-	uv run python crawler.py --all --detail
-	uv run python crawler.py -t 动漫 -p 10
-	uv run python crawler.py -t 动漫 -p 10 --detail
-	uv run python crawler.py --download
-	uv run python crawler.py -d 1664643
+	uv run python crawler.py --all                    # 全站抓取列表
+	uv run python crawler.py --all --detail           # 全站抓取列表+详情
+	uv run python crawler.py --detail                 # 独立补爬详情（从DB取未解析的）
+	uv run python crawler.py -t 动漫 -p 10            # 按标签爬列表
+	uv run python crawler.py -t 动漫 -p 10 --detail   # 按标签爬列表+详情
+	uv run python crawler.py --download               # 下载所有未下载视频
+	uv run python crawler.py --download -w 3          # 下载（3并发）
+	uv run python crawler.py -d 1664643               # 单个详情
 """
 import json
 import base64
@@ -21,6 +23,8 @@ import time
 import sqlite3
 import argparse
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
@@ -94,9 +98,20 @@ def video_url(path: str) -> str:
 class DB:
     def __init__(self, path=DB_PATH):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
+        self.path = path
+        self._local = threading.local()
+        self._lock = threading.Lock()
         self._init_schema()
+
+    @property
+    def conn(self):
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            # 使用 check_same_thread=False 允许跨线程
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_schema(self):
         self.conn.executescript("""
@@ -155,35 +170,36 @@ class DB:
 
     def insert_item(self, item: dict):
         a = item.get("authors", {}) or {}
-        self.conn.execute("""
-            INSERT OR IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
-                author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
-                tags, groups, themes, createTime, vodTime, crawled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            item.get("id"),
-            item.get("vodId"),
-            item.get("title"),
-            item.get("vodDuration"),
-            item.get("vodVersion"),
-            item.get("vodPic"),             # 相对路径
-            item.get("gif"),                # 相对路径
-            item.get("preview"),            # 相对路径
-            a.get("nickName"),
-            a.get("id"),
-            a.get("avatar"),                # 相对路径
-            a.get("fansNum"),
-            item.get("readNumber"),
-            item.get("likeNumber"),
-            item.get("comments"),
-            json.dumps(item.get("tags"), ensure_ascii=False),
-            json.dumps(item.get("groups")),
-            json.dumps(item.get("themes")),
-            item.get("createTime"),
-            item.get("vodTime"),
-            datetime.now().isoformat(),
-        ))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("""
+                INSERT OR IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
+                    author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
+                    tags, groups, themes, createTime, vodTime, crawled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                item.get("id"),
+                item.get("vodId"),
+                item.get("title"),
+                item.get("vodDuration"),
+                item.get("vodVersion"),
+                item.get("vodPic"),
+                item.get("gif"),
+                item.get("preview"),
+                a.get("nickName"),
+                a.get("id"),
+                a.get("avatar"),
+                a.get("fansNum"),
+                item.get("readNumber"),
+                item.get("likeNumber"),
+                item.get("comments"),
+                json.dumps(item.get("tags"), ensure_ascii=False),
+                json.dumps(item.get("groups")),
+                json.dumps(item.get("themes")),
+                item.get("createTime"),
+                item.get("vodTime"),
+                datetime.now().isoformat(),
+            ))
+            self.conn.commit()
 
     def count_items(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
@@ -198,7 +214,6 @@ class DB:
         stats = data.get("result", {}).get("statistics", {})
         group_names = vod.get("group_names", [])
 
-        # playUrls 处理
         play_urls = vod.get("vodFullPlayUrl", [])
         if isinstance(play_urls, str):
             play_urls = [play_urls]
@@ -207,27 +222,28 @@ class DB:
         play_urls_full = [{"addr": u.get("addr"), "type": u.get("type"),
                            "duration": u.get("duration"), "size": u.get("size")} for u in play_urls]
 
-        self.conn.execute("""
-            INSERT OR REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
-                statistics, authorDetail, detail_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            vod.get("id"),
-            vod.get("newAddr"),          # 相对路径
-            vod.get("mp4"),
-            json.dumps(play_urls_full, ensure_ascii=False),
-            json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
-                        for g in group_names], ensure_ascii=False),
-            json.dumps(stats, ensure_ascii=False),
-            json.dumps({
-                "nickName": author.get("nickName"),
-                "avatar": author.get("avatar"),  # 相对路径
-                "introduce": author.get("introduce"),
-                "fansNum": author.get("fansNum"),
-            }, ensure_ascii=False),
-            datetime.now().isoformat(),
-        ))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
+                    statistics, authorDetail, detail_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                vod.get("id"),
+                vod.get("newAddr"),
+                vod.get("mp4"),
+                json.dumps(play_urls_full, ensure_ascii=False),
+                json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
+                            for g in group_names], ensure_ascii=False),
+                json.dumps(stats, ensure_ascii=False),
+                json.dumps({
+                    "nickName": author.get("nickName"),
+                    "avatar": author.get("avatar"),
+                    "introduce": author.get("introduce"),
+                    "fansNum": author.get("fansNum"),
+                }, ensure_ascii=False),
+                datetime.now().isoformat(),
+            ))
+            self.conn.commit()
 
     def count_details(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM details").fetchone()[0]
@@ -236,8 +252,9 @@ class DB:
         return self.conn.execute("SELECT COUNT(*) FROM details WHERE downloaded=1").fetchone()[0]
 
     def mark_downloaded(self, iid: int, path: str):
-        self.conn.execute("UPDATE details SET downloaded=1, download_path=? WHERE id=?", (path, iid))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("UPDATE details SET downloaded=1, download_path=? WHERE id=?", (path, iid))
+            self.conn.commit()
 
     def get_undownloaded(self, limit=None) -> list:
         sql = """
@@ -255,11 +272,12 @@ class DB:
         return dict(row) if row else {"tag": tag, "page": 0, "total": 0, "collected": 0}
 
     def set_progress(self, tag: str, page: int, total: int, collected: int):
-        self.conn.execute("""
-            INSERT OR REPLACE INTO progress (tag, page, total, collected, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (tag, page, total, collected, datetime.now().isoformat()))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO progress (tag, page, total, collected, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (tag, page, total, collected, datetime.now().isoformat()))
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -335,59 +353,82 @@ def crawl_all(db: DB):
     print(f"[全站] 完成! 共 {db.count_items()} 条")
 
 
-def crawl_details(db: DB, tag: str):
-    # 查有列表但没详情的数据
+def crawl_details(db: DB, tag: str, workers: int = 5):
     rows = db.conn.execute("""
         SELECT id, title FROM items
         WHERE id NOT IN (SELECT id FROM details)
     """).fetchall()
 
     todo = [dict(r) for r in rows]
-    print(f"[{tag}] 待爬详情: {len(todo)} 条")
+    if not todo:
+        print(f"[{tag}] 详情已全部爬取")
+        return
 
-    for i, row in enumerate(todo):
+    print(f"[{tag}] 待爬详情: {len(todo)} 条, 并发: {workers}")
+
+    done_count = [0]  # mutable counter for thread safety
+    error_count = [0]
+    lock = threading.Lock()
+
+    def fetch_one(row):
         vid = row["id"]
         try:
             data = api_call(f"cms/vod/detail/{vid}", method=1)
             db.insert_detail(data)
-            if (i + 1) % 20 == 0:
-                print(f"  [{i+1}/{len(todo)}] 已爬 {db.count_details()} 条")
-        except Exception as e:
-            print(f"  [{i+1}/{len(todo)}] id={vid} 失败: {e}")
-            time.sleep(3)
-            continue
-        time.sleep(0.3)
+            with lock:
+                done_count[0] += 1
+                if done_count[0] % 50 == 0:
+                    print(f"  已爬 {done_count[0]}/{len(todo)} ({error_count[0]} err)")
+            return True
+        except Exception:
+            with lock:
+                error_count[0] += 1
+            time.sleep(2)
+            return False
 
-    print(f"[{tag}] 详情完成! 共 {db.count_details()} 条")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fetch_one, r): r for r in todo}
+        for _ in as_completed(futures):
+            pass
+
+    print(f"[{tag}] 详情完成! 成功 {done_count[0]}, 失败 {error_count[0]}, 共 {db.count_details()} 条")
 
 
-def download_videos(db: DB):
+def download_videos(db: DB, workers: int = 3):
     rows = db.get_undownloaded()
     if not rows:
         print("没有待下载的视频")
         return
 
-    print(f"待下载: {len(rows)} 个")
+    print(f"待下载: {len(rows)} 个, 并发: {workers}")
     dl_dir = os.path.join("output", "videos")
     os.makedirs(dl_dir, exist_ok=True)
 
-    for i, row in enumerate(rows):
+    done_count = [0]
+    fail_count = [0]
+    lock = threading.Lock()
+    total = len(rows)
+
+    def download_one(row):
         vid = row["id"]
         title = re.sub(r'[\\/*?:"<>|]', "_", row["title"] or str(vid))[:40]
         play_urls = json.loads(row["playUrls"] or "[]")
-
         url = video_url(play_urls[0]["addr"]) if play_urls else None
+
         if not url:
-            print(f"  [{i+1}/{len(rows)}] {title}: 无播放地址")
-            continue
+            return
 
         out = os.path.join(dl_dir, f"{vid}.mp4")
         if os.path.exists(out):
             db.mark_downloaded(vid, out)
-            continue
+            with lock:
+                done_count[0] += 1
+            return
 
         size = play_urls[0].get("size", 0) / 1024 / 1024 if play_urls else 0
-        print(f"  [{i+1}/{len(rows)}] {title} ({size:.0f}MB) ...", end=" ", flush=True)
+        with lock:
+            done = done_count[0] + fail_count[0]
+            print(f"  [{done+1}/{total}] {title} ({size:.0f}MB) ...", end=" ", flush=True)
 
         try:
             subprocess.run([
@@ -397,11 +438,24 @@ def download_videos(db: DB):
             ], check=True, timeout=300)
             db.mark_downloaded(vid, out)
             actual = os.path.getsize(out) / 1024 / 1024
-            print(f"完成 ({actual:.0f}MB)")
+            with lock:
+                done_count[0] += 1
+                print(f"完成 ({actual:.0f}MB)")
         except subprocess.TimeoutExpired:
-            print("超时")
+            with lock:
+                fail_count[0] += 1
+                print("超时")
         except Exception as e:
-            print(f"失败: {e}")
+            with lock:
+                fail_count[0] += 1
+                print(f"失败: {e}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(download_one, r) for r in rows]
+        for _ in as_completed(futures):
+            pass
+
+    print(f"下载完成! 成功 {done_count[0]}, 失败 {fail_count[0]}, 共 {db.count_downloaded()} 已下载")
 
 
 def main():
@@ -412,6 +466,7 @@ def main():
     parser.add_argument("--detail", action="store_true", help="爬完列表后继续爬详情")
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
     parser.add_argument("--all", action="store_true", help="全站抓取")
+    parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     args = parser.parse_args()
 
     db = DB()
@@ -424,19 +479,23 @@ def main():
             return
 
         if args.download:
-            download_videos(db)
+            download_videos(db, args.workers)
+            return
+
+        if args.detail and not args.tag and not args.all:
+            crawl_details(db, "__all__", args.workers)
             return
 
         if args.all:
             crawl_all(db)
             if args.detail:
-                crawl_details(db, "__all__")
+                crawl_details(db, "__all__", args.workers)
             return
 
         if args.tag:
             crawl_list(db, args.tag, args.pages)
             if args.detail:
-                crawl_details(db, args.tag)
+                crawl_details(db, args.tag, args.workers)
         else:
             print("=" * 50)
             print("主播视频爬虫 - 两阶段模式")
@@ -445,9 +504,10 @@ def main():
             print(f"已收集: {db.count_items()} 列表项, {db.count_details()} 详情, {db.count_downloaded()} 已下载")
             print()
             print("阶段1 - 爬取信息:")
-            print("  python crawler.py --all                         # 全站抓取")
-            print("  python crawler.py --all --detail                # 全站抓取+详情")
-            print("  python crawler.py -t <标签> -p <页数>            # 按标签爬")
+            print("  python crawler.py --all                         # 全站抓取列表")
+            print("  python crawler.py --all --detail                # 全站抓取列表+详情")
+            print("  python crawler.py --detail                      # 独立补爬详情(从DB取未解析的)")
+            print("  python crawler.py -t <标签> -p <页数>            # 按标签爬列表")
             print("  python crawler.py -t <标签> -p <页数> --detail   # 爬列表+详情")
             print()
             print("阶段2 - 下载视频:")
