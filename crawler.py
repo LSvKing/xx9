@@ -594,6 +594,39 @@ def update_config():
         print("\n所有域名均不可用，请检查网络或手动更新 config.json")
 
 
+def parse_curl_and_update(curl_cmd: str):
+    """从浏览器复制的 curl 命令中提取 token/域名，更新 config.json"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
+
+    # 提取 URL 中的域名
+    url_match = re.search(r"curl\s+'?(https?://[a-zA-Z0-9.-]+)", curl_cmd) or \
+                re.search(r"'?(https?://[a-zA-Z0-9.-]+\.[a-z]+)/", curl_cmd)
+    if url_match:
+        domain = url_match.group(1)
+        cfg["api_base"] = domain
+        print(f"api_base: {domain}")
+
+    # 提取 header 值
+    for field, key in [("accesstoken", "access_token"), ("jwttoken", "jwt_token"), ("origin", "frontend")]:
+        m = re.search(rf"-H\s+'?{field}:\s*['\"]?(\S+?)['\"]?\s*$", curl_cmd, re.I | re.M) or \
+           re.search(rf"{field}:\s*['\"]?(\S+?)['\"]?", curl_cmd, re.I)
+        if m:
+            val = m.group(1).rstrip("'\"")
+            if key == "frontend":
+                val = val.rstrip("/")
+            cfg[key] = val
+            print(f"{key}: {val[:50]}...")
+
+    # 尝试提取 origin 对应的前端域名（去掉路径）
+    if cfg.get("frontend"):
+        cfg["frontend"] = re.sub(r'/.*', '', cfg["frontend"])
+
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    print(f"\nconfig.json 已更新")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-t", "--tag", help="标签名")
@@ -604,11 +637,16 @@ def main():
     parser.add_argument("--all", action="store_true", help="全站抓取")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
+    parser.add_argument("--from-curl", type=str, help="从浏览器 curl 命令提取 token 并更新 config")
     args = parser.parse_args()
 
     db = DB()
 
     try:
+        if args.from_curl:
+            parse_curl_and_update(args.from_curl)
+            return
+
         if args.update:
             update_config()
             return
