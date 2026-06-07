@@ -2,10 +2,12 @@
 """
 主播视频爬虫 - SQLite 版本
 用法:
-  python crawler.py -t 动漫 -p 3               # 爬列表
-  python crawler.py -t 动漫 -p 3 --detail      # 爬列表+详情
-  python crawler.py -t 动漫 --download          # 下载已有详情的视频
-  python crawler.py -d 1664643                  # 单个详情
+  python crawler.py --all -p 5000             # 全站抓取列表
+  python crawler.py --all -p 5000 --detail    # 全站抓取列表+详情
+  python crawler.py -t 动漫 -p 10             # 按标签爬列表
+  python crawler.py -t 动漫 -p 10 --detail    # 按标签爬列表+详情
+  python crawler.py --download                # 下载所有未下载视频
+  python crawler.py -d 1664643                # 单个详情
 """
 import json
 import base64
