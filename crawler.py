@@ -600,12 +600,16 @@ def parse_curl_and_update(curl_cmd: str):
     cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
 
     # 提取 URL 中的域名
-    url_match = re.search(r"curl\s+'?(https?://[a-zA-Z0-9.-]+)", curl_cmd) or \
-                re.search(r"'?(https?://[a-zA-Z0-9.-]+\.[a-z]+)/", curl_cmd)
+        url_match = re.search(r"(https?://[a-zA-Z0-9.-]+\.[a-z]+)/", curl_cmd.replace("\\", ""))
     if url_match:
         domain = url_match.group(1)
-        cfg["api_base"] = domain
-        print(f"api_base: {domain}")
+        # 如果不是 api. 开头，只当 frontend 用
+        if "api." not in domain:
+            cfg["frontend"] = domain
+            print(f"frontend: {domain}")
+        else:
+            cfg["api_base"] = domain
+            print(f"api_base: {domain}")
 
     # 提取 header 值
     for field, key in [("accesstoken", "access_token"), ("jwttoken", "jwt_token"), ("origin", "frontend")]:
