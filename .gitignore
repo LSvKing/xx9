@@ -6,3 +6,4 @@ output/
 videos/
 .spec-workflow/
 .venv/
+uv.lock
