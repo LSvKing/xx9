@@ -5,3 +5,4 @@ output/
 *.db
 videos/
 .spec-workflow/
+.venv/
