@@ -1,0 +1,20 @@
+{
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "YOUR_PASSWORD",
+    "database": "xx9"
+  },
+  "api_base": "https://api.example.xyz",
+  "frontend": "https://frontend.example.xyz",
+  "media_base": "https://rr.rxjhwl.com",
+  "access_token": "",
+  "jwt_token": "",
+  "keys": [
+    "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
+    "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
+    "T0RVp7KIPamrtQ33", "8HbPxhX6fjhhhwok", "ugvseZc5Kkj8ecmV",
+    "G7i3OPcfNhBnAYpc"
+  ]
+}

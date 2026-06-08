@@ -7,3 +7,7 @@ videos/
 .spec-workflow/
 .venv/
 uv.lock
+config.json
+output/
+__pycache__/
+*.pyc

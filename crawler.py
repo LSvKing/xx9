@@ -20,7 +20,6 @@ import base64
 import os
 import re
 import time
-import sqlite3
 import argparse
 import subprocess
 import threading
@@ -28,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import requests
+import pymysql
+import pymysql.cursors
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
@@ -37,6 +38,10 @@ from Crypto.Util.Padding import pad, unpad
 def _load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     defaults = {
+        "mysql": {
+            "host": "localhost", "port": 3306,
+            "user": "root", "password": "", "database": "crawler",
+        },
         "api_base": "https://api.1d1bzspqmi46l.xyz",
         "frontend": "https://rw345o29u6ivj.xyz",
         "media_base": "https://rr.rxjhwl.com",
@@ -62,7 +67,7 @@ API_BASE = _cfg["api_base"]
 API_PATH = "/fast-endecode/main/request"
 FRONTEND = _cfg["frontend"]
 MEDIA_BASE = _cfg["media_base"]
-DB_PATH = "output/crawler.db"
+MYSQL = _cfg["mysql"]
 ACCESS_TOKEN = _cfg["access_token"]
 JWT_TOKEN = _cfg["jwt_token"]
 KEYS = _cfg["keys"]
@@ -115,118 +120,147 @@ def video_url(path: str) -> str:
     return MEDIA_BASE + (path if path.startswith("/") else "/" + path)
 
 
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS items (
+        id BIGINT PRIMARY KEY,
+        vodId VARCHAR(64),
+        title TEXT,
+        duration INT,
+        quality VARCHAR(32),
+        vodPic TEXT,
+        gif TEXT,
+        preview TEXT,
+        author VARCHAR(255),
+        authorId BIGINT,
+        authorAvatar TEXT,
+        fansNum INT,
+        readNumber INT,
+        likeNumber INT,
+        comments INT,
+        tags TEXT,
+        groups TEXT,
+        themes TEXT,
+        createTime BIGINT,
+        vodTime BIGINT,
+        crawled_at VARCHAR(32),
+        INDEX idx_items_tags (tags(100)),
+        INDEX idx_items_authorId (authorId),
+        INDEX idx_items_crawled (crawled_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS details (
+        id BIGINT PRIMARY KEY,
+        newAddr TEXT,
+        mp4 TEXT,
+        playUrls TEXT,
+        groupNames TEXT,
+        statistics TEXT,
+        authorDetail TEXT,
+        downloaded INT DEFAULT 0,
+        download_path TEXT,
+        detail_at VARCHAR(32),
+        INDEX idx_details_downloaded (downloaded)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS progress (
+        tag VARCHAR(64) PRIMARY KEY,
+        page INT,
+        total INT,
+        collected INT,
+        updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+]
+
+
 class DB:
-    def __init__(self, path=DB_PATH):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.path = path
+    def __init__(self, cfg=MYSQL):
+        self.cfg = cfg
         self._local = threading.local()
         self._lock = threading.Lock()
+        self._ensure_database()
         self._init_schema()
+
+    def _ensure_database(self):
+        """连接时不指定 database，先建库（不存在则创建）"""
+        boot = pymysql.connect(
+            host=self.cfg["host"], port=int(self.cfg.get("port", 3306)),
+            user=self.cfg["user"], password=self.cfg.get("password", ""),
+            charset="utf8mb4", autocommit=True,
+        )
+        try:
+            boot.cursor().execute(
+                f"CREATE DATABASE IF NOT EXISTS `{self.cfg['database']}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+        finally:
+            boot.close()
 
     @property
     def conn(self):
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            # 使用 check_same_thread=False 允许跨线程
-            conn = sqlite3.connect(self.path, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn = conn
+            self._local.conn = pymysql.connect(
+                host=self.cfg["host"], port=int(self.cfg.get("port", 3306)),
+                user=self.cfg["user"], password=self.cfg.get("password", ""),
+                database=self.cfg["database"], charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+            )
+        # 长时间运行防止 "MySQL server has gone away"
+        self._local.conn.ping(reconnect=True)
         return self._local.conn
 
+    def query(self, sql: str, params=()) -> list:
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def execute(self, sql: str, params=()):
+        with self._lock:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, params)
+
     def _init_schema(self):
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS items (
-                id INTEGER PRIMARY KEY,
-                vodId TEXT,
-                title TEXT,
-                duration INTEGER,
-                quality TEXT,
-                vodPic TEXT,
-                gif TEXT,
-                preview TEXT,
-                author TEXT,
-                authorId INTEGER,
-                authorAvatar TEXT,
-                fansNum INTEGER,
-                readNumber INTEGER,
-                likeNumber INTEGER,
-                comments INTEGER,
-                tags TEXT,
-                groups TEXT,
-                themes TEXT,
-                createTime INTEGER,
-                vodTime INTEGER,
-                crawled_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS details (
-                id INTEGER PRIMARY KEY,
-                newAddr TEXT,
-                mp4 TEXT,
-                playUrls TEXT,
-                groupNames TEXT,
-                statistics TEXT,
-                authorDetail TEXT,
-                downloaded INTEGER DEFAULT 0,
-                download_path TEXT,
-                detail_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS progress (
-                tag TEXT PRIMARY KEY,
-                page INTEGER,
-                total INTEGER,
-                collected INTEGER,
-                updated_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_items_tags ON items(tags);
-            CREATE INDEX IF NOT EXISTS idx_items_authorId ON items(authorId);
-            CREATE INDEX IF NOT EXISTS idx_items_crawled ON items(crawled_at);
-            CREATE INDEX IF NOT EXISTS idx_details_downloaded ON details(downloaded);
-        """)
-        self.conn.commit()
+        for ddl in SCHEMA:
+            self.execute(ddl)
 
     # --- items ---
     def item_exists(self, iid: int) -> bool:
-        return self.conn.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone() is not None
+        return bool(self.query("SELECT 1 FROM items WHERE id=%s", (iid,)))
 
     def insert_item(self, item: dict):
         a = item.get("authors", {}) or {}
-        with self._lock:
-            self.conn.execute("""
-                INSERT OR IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
-                    author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
-                    tags, groups, themes, createTime, vodTime, crawled_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                item.get("id"),
-                item.get("vodId"),
-                item.get("title"),
-                item.get("vodDuration"),
-                item.get("vodVersion"),
-                item.get("vodPic"),
-                item.get("gif"),
-                item.get("preview"),
-                a.get("nickName"),
-                a.get("id"),
-                a.get("avatar"),
-                a.get("fansNum"),
-                item.get("readNumber"),
-                item.get("likeNumber"),
-                item.get("comments"),
-                json.dumps(item.get("tags"), ensure_ascii=False),
-                json.dumps(item.get("groups")),
-                json.dumps(item.get("themes")),
-                item.get("createTime"),
-                item.get("vodTime"),
-                datetime.now().isoformat(),
-            ))
-            self.conn.commit()
+        self.execute("""
+            INSERT IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
+                author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
+                tags, groups, themes, createTime, vodTime, crawled_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            item.get("id"),
+            item.get("vodId"),
+            item.get("title"),
+            item.get("vodDuration"),
+            item.get("vodVersion"),
+            item.get("vodPic"),
+            item.get("gif"),
+            item.get("preview"),
+            a.get("nickName"),
+            a.get("id"),
+            a.get("avatar"),
+            a.get("fansNum"),
+            item.get("readNumber"),
+            item.get("likeNumber"),
+            item.get("comments"),
+            json.dumps(item.get("tags"), ensure_ascii=False),
+            json.dumps(item.get("groups")),
+            json.dumps(item.get("themes")),
+            item.get("createTime"),
+            item.get("vodTime"),
+            datetime.now().isoformat(),
+        ))
 
     def count_items(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        return self.query("SELECT COUNT(*) AS n FROM items")[0]["n"]
 
     # --- details ---
     def detail_exists(self, iid: int) -> bool:
-        return self.conn.execute("SELECT 1 FROM details WHERE id=?", (iid,)).fetchone() is not None
+        return bool(self.query("SELECT 1 FROM details WHERE id=%s", (iid,)))
 
     def insert_detail(self, data: dict):
         vod = data.get("result", {}).get("vod", {})
@@ -242,39 +276,35 @@ class DB:
         play_urls_full = [{"addr": u.get("addr"), "type": u.get("type"),
                            "duration": u.get("duration"), "size": u.get("size")} for u in play_urls]
 
-        with self._lock:
-            self.conn.execute("""
-                INSERT OR REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
-                    statistics, authorDetail, detail_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                vod.get("id"),
-                vod.get("newAddr"),
-                vod.get("mp4"),
-                json.dumps(play_urls_full, ensure_ascii=False),
-                json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
-                            for g in group_names], ensure_ascii=False),
-                json.dumps(stats, ensure_ascii=False),
-                json.dumps({
-                    "nickName": author.get("nickName"),
-                    "avatar": author.get("avatar"),
-                    "introduce": author.get("introduce"),
-                    "fansNum": author.get("fansNum"),
-                }, ensure_ascii=False),
-                datetime.now().isoformat(),
-            ))
-            self.conn.commit()
+        self.execute("""
+            REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
+                statistics, authorDetail, detail_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            vod.get("id"),
+            vod.get("newAddr"),
+            vod.get("mp4"),
+            json.dumps(play_urls_full, ensure_ascii=False),
+            json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
+                        for g in group_names], ensure_ascii=False),
+            json.dumps(stats, ensure_ascii=False),
+            json.dumps({
+                "nickName": author.get("nickName"),
+                "avatar": author.get("avatar"),
+                "introduce": author.get("introduce"),
+                "fansNum": author.get("fansNum"),
+            }, ensure_ascii=False),
+            datetime.now().isoformat(),
+        ))
 
     def count_details(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM details").fetchone()[0]
+        return self.query("SELECT COUNT(*) AS n FROM details")[0]["n"]
 
     def count_downloaded(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM details WHERE downloaded=1").fetchone()[0]
+        return self.query("SELECT COUNT(*) AS n FROM details WHERE downloaded=1")[0]["n"]
 
     def mark_downloaded(self, iid: int, path: str):
-        with self._lock:
-            self.conn.execute("UPDATE details SET downloaded=1, download_path=? WHERE id=?", (path, iid))
-            self.conn.commit()
+        self.execute("UPDATE details SET downloaded=1, download_path=%s WHERE id=%s", (path, iid))
 
     def get_undownloaded(self, limit=None) -> list:
         sql = """
@@ -283,24 +313,24 @@ class DB:
             WHERE d.downloaded = 0 AND d.playUrls IS NOT NULL
         """
         if limit:
-            sql += f" LIMIT {limit}"
-        return self.conn.execute(sql).fetchall()
+            sql += f" LIMIT {int(limit)}"
+        return self.query(sql)
 
     # --- progress ---
     def get_progress(self, tag: str) -> dict:
-        row = self.conn.execute("SELECT * FROM progress WHERE tag=?", (tag,)).fetchone()
-        return dict(row) if row else {"tag": tag, "page": 0, "total": 0, "collected": 0}
+        rows = self.query("SELECT * FROM progress WHERE tag=%s", (tag,))
+        return dict(rows[0]) if rows else {"tag": tag, "page": 0, "total": 0, "collected": 0}
 
     def set_progress(self, tag: str, page: int, total: int, collected: int):
-        with self._lock:
-            self.conn.execute("""
-                INSERT OR REPLACE INTO progress (tag, page, total, collected, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (tag, page, total, collected, datetime.now().isoformat()))
-            self.conn.commit()
+        self.execute("""
+            REPLACE INTO progress (tag, page, total, collected, updated_at)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (tag, page, total, collected, datetime.now().isoformat()))
 
     def close(self):
-        self.conn.close()
+        if hasattr(self._local, "conn") and self._local.conn is not None:
+            self._local.conn.close()
+            self._local.conn = None
 
 
 def crawl_list(db: DB, tag: str, max_pages: int):
@@ -374,10 +404,10 @@ def crawl_all(db: DB):
 
 
 def crawl_details(db: DB, tag: str, workers: int = 5):
-    rows = db.conn.execute("""
+    rows = db.query("""
         SELECT id, title FROM items
         WHERE id NOT IN (SELECT id FROM details)
-    """).fetchall()
+    """)
 
     todo = [dict(r) for r in rows]
     if not todo:
@@ -683,7 +713,7 @@ def main():
             print("=" * 50)
             print("主播视频爬虫 - 两阶段模式")
             print("=" * 50)
-            print(f"数据库: {DB_PATH}")
+            print(f"数据库: MySQL {MYSQL['host']}:{MYSQL['port']}/{MYSQL['database']}")
             print(f"已收集: {db.count_items()} 列表项, {db.count_details()} 详情, {db.count_downloaded()} 已下载")
             print()
             print("阶段1 - 爬取信息:")
