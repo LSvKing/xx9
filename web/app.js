@@ -44,6 +44,7 @@ $('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }
 // ---------- 列表 ----------
 const fmtDur = (s) => { s = s || 0; const m = Math.floor(s / 60), x = s % 60; return `${m}:${String(x).padStart(2, '0')}`; };
 const fmtNum = (n) => n >= 10000 ? (n / 10000).toFixed(1) + 'w' : (n || 0);
+const fmtDate = (ms) => { if (!ms) return ''; const d = new Date(+ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 function reset() { state.page = 1; state.end = false; $('#grid').innerHTML = ''; load(); }
 
@@ -76,7 +77,8 @@ function card(v) {
       <span class="dur">${fmtDur(v.duration)}</span>
     </div>
     <div class="title">${esc(v.title || '')}</div>
-    <div class="sub"><span>${esc(v.author || '')}</span><span>▶ ${fmtNum(v.readNumber)}</span></div>`;
+    <div class="sub"><span>${esc(v.author || '')}</span><span>▶ ${fmtNum(v.readNumber)}</span></div>
+    <div class="sub"><span>${fmtDate(v.createTime)}</span></div>`;
   el.onclick = () => openPlayer(v.id);
   io.observe(el.querySelector('img.cover'));
   return el;
@@ -147,7 +149,7 @@ async function _openPlayer(id) {
   curId = id;
   const v = await api('/api/video/' + id).then(r => r.json());
   $('#p-title').textContent = v.title || '';
-  $('#p-stats').textContent = `▶ ${fmtNum(v.readNumber)}  ♥ ${fmtNum(v.likeNumber)}`;
+  $('#p-stats').textContent = `▶ ${fmtNum(v.readNumber)}  ♥ ${fmtNum(v.likeNumber)}  ·  ${fmtDate(v.createTime)}`;
   $('#p-tags').innerHTML = (v.tags || []).map(t => `<span>${esc(t)}</span>`).join('');
   $('#p-tags').querySelectorAll('span').forEach(s => s.onclick = () => setHash({ q: s.textContent, source: 'all', v: null }));
   const favBtn = $('#fav-btn');

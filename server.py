@@ -170,6 +170,7 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
         "cover": pic_url(r["vodPic"]),
         "duration": r["duration"], "author": r["author"],
         "readNumber": r["readNumber"], "likeNumber": r["likeNumber"],
+        "createTime": r["createTime"],
     } for r in rows]
     return {"page": page, "page_size": page_size, "items": items, "has_more": len(rows) == page_size}
 
