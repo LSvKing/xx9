@@ -48,6 +48,9 @@ def _load_config():
         "mp4_base": "https://mp4.almusiclub.com",      # mp4 前缀
         "access_token": "",
         "jwt_token": "",
+        "web_password": "xx9",                          # 前端登录密码
+        "web_secret": "change-this-secret",             # cookie 签名密钥
+
         "keys": [
             "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
             "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",

@@ -9,8 +9,12 @@
   "api_base": "https://api.example.xyz",
   "frontend": "https://frontend.example.xyz",
   "media_base": "https://rr.rxjhwl.com",
+  "pic_base": "https://qv1tx.cloudworki.com",
+  "mp4_base": "https://mp4.almusiclub.com",
   "access_token": "",
   "jwt_token": "",
+  "web_password": "xx9",
+  "web_secret": "change-this-secret",
   "keys": [
     "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
     "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",

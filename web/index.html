@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>xx9</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+</head>
+<body>
+  <!-- 登录遮罩 -->
+  <div id="login" class="overlay hidden">
+    <div class="login-box">
+      <h2>xx9</h2>
+      <input id="pw" type="password" placeholder="密码" autocomplete="current-password">
+      <button id="login-btn">进入</button>
+      <div id="login-err" class="err"></div>
+    </div>
+  </div>
+
+  <!-- 顶栏 -->
+  <header>
+    <div class="brand" data-source="all">xx9</div>
+    <input id="search" type="search" placeholder="搜索标题…">
+    <select id="group"><option value="0">全部分类</option></select>
+    <select id="sort">
+      <option value="new">最新</option>
+      <option value="hot">最热</option>
+      <option value="long">最长</option>
+    </select>
+    <nav>
+      <a data-source="all" class="active">全部</a>
+      <a data-source="fav">收藏</a>
+      <a data-source="hist">历史</a>
+    </nav>
+    <button id="logout">退出</button>
+  </header>
+
+  <!-- 封面墙 -->
+  <main id="grid"></main>
+  <div id="status" class="status"></div>
+
+  <!-- 播放器弹层 -->
+  <div id="player" class="overlay hidden">
+    <div class="player-box">
+      <button class="close" id="close-player">×</button>
+      <video id="video" controls playsinline></video>
+      <div class="meta">
+        <h3 id="p-title"></h3>
+        <div class="actions">
+          <button id="fav-btn">☆ 收藏</button>
+          <a id="dl-btn" href="#">⬇ 下载</a>
+          <span id="p-stats" class="stats"></span>
+        </div>
+        <div id="p-tags" class="tags"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

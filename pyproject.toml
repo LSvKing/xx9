@@ -8,6 +8,9 @@ dependencies = [
     "pycryptodome>=3.19",
     "playwright>=1.60.0",
     "pymysql>=1.1",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "itsdangerous>=2.1",
 ]
 
 # 国内镜像（清华），加速 uv sync / 依赖安装
