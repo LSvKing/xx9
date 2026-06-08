@@ -24,9 +24,20 @@ header nav a.active { background: var(--acc); color: #fff; }
 
 /* 封面墙 */
 #grid {
-  display: grid; gap: 12px; padding: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  display: grid; gap: 10px; padding: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
 }
+
+/* 首页分组聚合 */
+#home { padding-bottom: 20px; }
+.theme { margin-top: 6px; }
+.theme h3 { padding: 14px 14px 8px; font-size: 15px; font-weight: 600; }
+.theme .row {
+  display: flex; gap: 10px; overflow-x: auto; padding: 0 14px 6px;
+  scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+}
+.theme .row::-webkit-scrollbar { height: 0; }
+.theme .row .card { width: 150px; flex: 0 0 auto; scroll-snap-align: start; }
 .card { background: var(--card); border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform .1s; }
 .card:hover { transform: translateY(-3px); }
 .thumb { position: relative; aspect-ratio: 16/10; background: #0a0c14; }

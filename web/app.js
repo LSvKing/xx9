@@ -90,14 +90,18 @@ window.addEventListener('scroll', () => {
   if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) load();
 });
 
-// ---------- 筛选控件（都改 hash，由 route 应用）----------
+// ---------- 筛选控件（都改 hash，由 route 应用；在首页时切到「全部」浏览）----------
+function browse(patch) {
+  if (parseHash().source === 'home') patch.source = 'all';   // 首页不支持筛选，切到全部
+  setHash(patch);
+}
 let searchTimer;
 $('#search').addEventListener('input', e => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => setHash({ q: e.target.value.trim(), v: null }), 350);
+  searchTimer = setTimeout(() => browse({ q: e.target.value.trim(), v: null }), 350);
 });
-$('#group').onchange = e => setHash({ g: +e.target.value });
-$('#sort').onchange = e => setHash({ sort: e.target.value });
+$('#group').onchange = e => browse({ g: +e.target.value, v: null });
+$('#sort').onchange = e => browse({ sort: e.target.value, v: null });
 document.querySelectorAll('header nav a, .brand').forEach(a => {
   a.onclick = () => setHash({ source: a.dataset.source, v: null });
 });
@@ -105,13 +109,13 @@ document.querySelectorAll('header nav a, .brand').forEach(a => {
 // ---------- hash 路由 ----------
 function parseHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { q: p.get('q') || '', source: p.get('source') || 'all', sort: p.get('sort') || 'new', g: +(p.get('g') || 0), v: p.get('v') || null };
+  return { q: p.get('q') || '', source: p.get('source') || 'home', sort: p.get('sort') || 'new', g: +(p.get('g') || 0), v: p.get('v') || null };
 }
 function setHash(patch) {
   const o = Object.assign(parseHash(), patch);
   const p = new URLSearchParams();
   if (o.q) p.set('q', o.q);
-  if (o.source && o.source !== 'all') p.set('source', o.source);
+  if (o.source && o.source !== 'home') p.set('source', o.source);
   if (o.sort && o.sort !== 'new') p.set('sort', o.sort);
   if (o.g) p.set('g', o.g);
   if (o.v) p.set('v', o.v);
@@ -123,16 +127,43 @@ function syncControls(h) {
   $('#sort').value = h.sort; $('#group').value = h.g;
   document.querySelectorAll('header nav a').forEach(x => x.classList.toggle('active', x.dataset.source === h.source));
 }
+let curView = null;
 function route() {
   const h = parseHash();
   syncControls(h);
-  if (h.q !== state.q || h.source !== state.source || h.sort !== state.sort || h.g !== state.group) {
+  const isHome = h.source === 'home';
+  $('#home').classList.toggle('hidden', !isHome);
+  $('#grid').classList.toggle('hidden', isHome);
+  $('#status').classList.toggle('hidden', isHome);
+  if (isHome) {
+    if (curView !== 'home') { curView = 'home'; renderHome(); }
+  } else {
+    const changed = h.q !== state.q || h.source !== state.source || h.sort !== state.sort || h.g !== state.group;
     state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g;
-    reset();
+    if (curView !== 'grid' || changed) { curView = 'grid'; reset(); }
   }
   if (h.v) _openPlayer(+h.v); else _closePlayer();
 }
 window.addEventListener('hashchange', route);
+
+// ---------- 首页：分组聚合（代理 theme/index）----------
+async function renderHome() {
+  const home = $('#home');
+  home.innerHTML = '<div class="status">加载中…</div>';
+  try {
+    const themes = await api('/api/home').then(r => r.json());
+    home.innerHTML = '';
+    for (const t of themes) {
+      const sec = document.createElement('div');
+      sec.className = 'theme';
+      sec.innerHTML = `<h3>${esc(t.title || '')}</h3><div class="row"></div>`;
+      const row = sec.querySelector('.row');
+      for (const v of t.items) row.appendChild(card(v));
+      home.appendChild(sec);
+    }
+    if (!themes.length) home.innerHTML = '<div class="status">首页暂无内容</div>';
+  } catch (e) { home.innerHTML = '<div class="status">加载失败</div>'; }
+}
 
 // ---------- 播放器 ----------
 let hls = null;
@@ -264,18 +295,13 @@ async function init() {
       $('#group').appendChild(o);
     }
   } catch (e) {}
-  // 应用初始 hash（分享链接里的筛选/视频）
-  const h = parseHash();
-  syncControls(h);
-  state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g;
-  reset();
-  if (h.v) {
-    // 深链直接进视频时，垫一个网格历史，让后退能回列表而不是退站
+  // 深链直接进视频时，垫一个历史条目，让后退能回上一层而不是退站
+  if (parseHash().v) {
     const full = location.hash;
     history.replaceState(null, '', location.pathname + location.search);
     history.pushState(null, '', full);
-    _openPlayer(+h.v);
   }
+  route();   // 渲染首页/网格 + 打开视频（如有）
 }
 
 checkAuth();

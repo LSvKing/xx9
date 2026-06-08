@@ -250,6 +250,42 @@ def groups(_=Depends(require_auth)):
     return _groups["data"]
 
 
+# ============================================================
+# 首页分组聚合（代理原站 theme/index，缓存 5 分钟）
+# ============================================================
+_home = {"t": 0.0, "data": []}
+
+
+@app.get("/api/home")
+def home(_=Depends(require_auth)):
+    if time.time() - _home["t"] > 300 or not _home["data"]:
+        try:
+            themes = []
+            for _ in range(3):                       # theme/index 偶发抖动，重试
+                r = c.api_call("theme/index", method=2, params={"osType": 3})
+                themes = r.get("data") or r.get("result") or []
+                if themes:
+                    break
+                time.sleep(0.5)
+            out = []
+            for t in themes:
+                items = [{
+                    "id": v.get("id"), "title": v.get("title"),
+                    "cover": pic_url(v.get("vodPic")),
+                    "duration": v.get("vodDuration") or v.get("duration") or 0,
+                    "readNumber": v.get("readNumber"),
+                    "createTime": v.get("createTime") or v.get("vodTime"),
+                } for v in (t.get("data") or []) if v.get("id")]
+                if items:
+                    out.append({"id": t.get("id"), "title": t.get("title"), "items": items})
+            if out:
+                _home["data"] = out
+                _home["t"] = time.time()
+        except Exception:
+            pass
+    return _home["data"]
+
+
 # 下载改由浏览器直连 CDN 完成（拉分片 + AES 解密 + 拼 .ts），不经后端，见 web/app.js
 
 

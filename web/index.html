@@ -30,16 +30,19 @@
       <option value="long">最长</option>
     </select>
     <nav>
-      <a data-source="all" class="active">全部</a>
+      <a data-source="home" class="active">首页</a>
+      <a data-source="all">全部</a>
       <a data-source="fav">收藏</a>
       <a data-source="hist">历史</a>
     </nav>
     <button id="logout">退出</button>
   </header>
 
+  <!-- 首页：分组聚合 -->
+  <div id="home"></div>
   <!-- 封面墙 -->
-  <main id="grid"></main>
-  <div id="status" class="status"></div>
+  <main id="grid" class="hidden"></main>
+  <div id="status" class="status hidden"></div>
 
   <!-- 播放器弹层 -->
   <div id="player" class="overlay hidden">
