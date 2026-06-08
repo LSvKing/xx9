@@ -156,8 +156,9 @@ def video_url(path: str) -> str:
 
 
 SCHEMA = [
-    """CREATE TABLE IF NOT EXISTS items (
+    """CREATE TABLE IF NOT EXISTS videos (
         id BIGINT PRIMARY KEY,
+        -- 列表字段
         vodId VARCHAR(64),
         title TEXT,
         duration INT,
@@ -178,12 +179,7 @@ SCHEMA = [
         createTime BIGINT,
         vodTime BIGINT,
         crawled_at VARCHAR(32),
-        INDEX idx_items_tags (tags(100)),
-        INDEX idx_items_authorId (authorId),
-        INDEX idx_items_crawled (crawled_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
-    """CREATE TABLE IF NOT EXISTS details (
-        id BIGINT PRIMARY KEY,
+        -- 详情字段
         newAddr TEXT,
         mp4 TEXT,
         playUrls TEXT,
@@ -193,7 +189,11 @@ SCHEMA = [
         downloaded INT DEFAULT 0,
         download_path TEXT,
         detail_at VARCHAR(32),
-        INDEX idx_details_downloaded (downloaded)
+        INDEX idx_videos_tags (tags(100)),
+        INDEX idx_videos_authorId (authorId),
+        INDEX idx_videos_crawled (crawled_at),
+        INDEX idx_videos_downloaded (downloaded),
+        INDEX idx_videos_detail (detail_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS progress (
         tag VARCHAR(64) PRIMARY KEY,
@@ -203,6 +203,27 @@ SCHEMA = [
         updated_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
 ]
+
+# videos 表列定义（列表字段 + 详情字段，合成一张表）
+_LIST_COLS = [
+    "id", "vodId", "title", "duration", "quality", "vodPic", "gif", "preview",
+    "author", "authorId", "authorAvatar", "fansNum", "readNumber", "likeNumber",
+    "comments", "tags", "`groups`", "themes", "createTime", "vodTime", "crawled_at",
+]
+_DETAIL_COLS = ["newAddr", "mp4", "playUrls", "groupNames", "statistics", "authorDetail", "detail_at"]
+_ALL_COLS = _LIST_COLS + _DETAIL_COLS
+
+# 列表写入：只填列表字段，已存在则跳过（不覆盖已抓到的详情/下载状态）
+_LIST_SQL = (
+    f"INSERT IGNORE INTO videos ({', '.join(_LIST_COLS)}) "
+    f"VALUES ({', '.join(['%s'] * len(_LIST_COLS))})"
+)
+# 详情写入：填全部字段，已存在则更新列表+详情字段（downloaded/download_path 不动，保留下载状态）
+_DETAIL_SQL = (
+    f"INSERT INTO videos ({', '.join(_ALL_COLS)}) "
+    f"VALUES ({', '.join(['%s'] * len(_ALL_COLS))}) "
+    "ON DUPLICATE KEY UPDATE " + ", ".join(f"{c}=VALUES({c})" for c in (_LIST_COLS[1:] + _DETAIL_COLS))
+)
 
 
 class DB:
@@ -264,16 +285,9 @@ class DB:
         for ddl in SCHEMA:
             self.execute(ddl)
 
-    # --- items ---
-    _ITEM_SQL = """
-        INSERT IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
-            author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
-            tags, `groups`, themes, createTime, vodTime, crawled_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
-
+    # --- 列表字段（来自搜索 item 或详情 vod，结构一致）---
     @staticmethod
-    def _item_row(item: dict) -> tuple:
+    def _list_row(item: dict) -> tuple:
         a = item.get("authors", {}) or {}
         return (
             item.get("id"), item.get("vodId"), item.get("title"),
@@ -286,37 +300,15 @@ class DB:
             item.get("createTime"), item.get("vodTime"), datetime.now().isoformat(),
         )
 
-    def item_exists(self, iid: int) -> bool:
-        return bool(self.query("SELECT 1 FROM items WHERE id=%s", (iid,)))
-
-    def insert_item(self, item: dict):
-        self.execute(self._ITEM_SQL, self._item_row(item))
-
-    def insert_items_batch(self, items: list) -> int:
-        """批量插入列表项，返回实际新增行数（INSERT IGNORE 自动去重）。"""
-        rows = [self._item_row(it) for it in items if it.get("id") is not None]
-        return self.executemany(self._ITEM_SQL, rows)
-
-    def count_items(self) -> int:
-        return self.query("SELECT COUNT(*) AS n FROM items")[0]["n"]
-
-    # --- details ---
-    _DETAIL_SQL = """
-        REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
-            statistics, authorDetail, detail_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """
-
     @staticmethod
-    def _detail_row(data: dict):
-        """从详情响应构造 details 行；无 vod.id 返回 None（已删除/空洞）。"""
+    def _detail_part(data: dict):
+        """详情响应里的详情字段（7 列）；无 vod.id 返回 None（已删除/空洞）。"""
         vod = (data.get("result") or {}).get("vod") or {}
         if not vod.get("id"):
             return None
         author = (data.get("result") or {}).get("author") or {}
         stats = (data.get("result") or {}).get("statistics") or {}
         group_names = vod.get("group_names", []) or []
-
         play_urls = vod.get("vodFullPlayUrl", [])
         if isinstance(play_urls, str):
             play_urls = [play_urls]
@@ -325,7 +317,7 @@ class DB:
         play_urls_full = [{"addr": u.get("addr"), "type": u.get("type"),
                            "duration": u.get("duration"), "size": u.get("size")} for u in play_urls]
         return (
-            vod.get("id"), vod.get("newAddr"), vod.get("mp4"),
+            vod.get("newAddr"), vod.get("mp4"),
             json.dumps(play_urls_full, ensure_ascii=False),
             json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
                         for g in group_names], ensure_ascii=False),
@@ -337,32 +329,56 @@ class DB:
             datetime.now().isoformat(),
         )
 
+    @classmethod
+    def _full_row(cls, data: dict):
+        """详情响应 -> videos 全字段行（列表21 + 详情7）；无 vod.id 返回 None。"""
+        det = cls._detail_part(data)
+        if det is None:
+            return None
+        vod = (data.get("result") or {}).get("vod") or {}
+        return cls._list_row(vod) + det
+
+    # --- 列表写入（INSERT IGNORE，不覆盖已有详情）---
+    def item_exists(self, iid: int) -> bool:
+        return bool(self.query("SELECT 1 FROM videos WHERE id=%s", (iid,)))
+
+    def insert_item(self, item: dict):
+        self.execute(_LIST_SQL, self._list_row(item))
+
+    def insert_items_batch(self, items: list) -> int:
+        """批量写列表字段，返回实际新增行数（INSERT IGNORE 去重）。"""
+        rows = [self._list_row(it) for it in items if it.get("id") is not None]
+        return self.executemany(_LIST_SQL, rows)
+
+    def count_items(self) -> int:
+        return self.query("SELECT COUNT(*) AS n FROM videos")[0]["n"]
+
+    # --- 详情写入（INSERT ... ON DUPLICATE KEY UPDATE，补全详情字段）---
     def detail_exists(self, iid: int) -> bool:
-        return bool(self.query("SELECT 1 FROM details WHERE id=%s", (iid,)))
+        return bool(self.query("SELECT 1 FROM videos WHERE id=%s AND detail_at IS NOT NULL", (iid,)))
 
     def insert_detail(self, data: dict):
-        row = self._detail_row(data)
+        row = self._full_row(data)
         if row:
-            self.execute(self._DETAIL_SQL, row)
+            self.execute(_DETAIL_SQL, row)
 
     def insert_details_batch(self, data_list: list) -> int:
-        rows = [r for r in (self._detail_row(d) for d in data_list) if r]
-        return self.executemany(self._DETAIL_SQL, rows)
+        rows = [r for r in (self._full_row(d) for d in data_list) if r]
+        return self.executemany(_DETAIL_SQL, rows)
 
     def count_details(self) -> int:
-        return self.query("SELECT COUNT(*) AS n FROM details")[0]["n"]
+        return self.query("SELECT COUNT(*) AS n FROM videos WHERE detail_at IS NOT NULL")[0]["n"]
 
     def count_downloaded(self) -> int:
-        return self.query("SELECT COUNT(*) AS n FROM details WHERE downloaded=1")[0]["n"]
+        return self.query("SELECT COUNT(*) AS n FROM videos WHERE downloaded=1")[0]["n"]
 
     def mark_downloaded(self, iid: int, path: str):
-        self.execute("UPDATE details SET downloaded=1, download_path=%s WHERE id=%s", (path, iid))
+        self.execute("UPDATE videos SET downloaded=1, download_path=%s WHERE id=%s", (path, iid))
 
     def get_undownloaded(self, limit=None) -> list:
         sql = """
-            SELECT d.*, i.title FROM details d
-            LEFT JOIN items i ON d.id = i.id
-            WHERE d.downloaded = 0 AND d.playUrls IS NOT NULL
+            SELECT id, title, playUrls FROM videos
+            WHERE downloaded = 0 AND playUrls IS NOT NULL
         """
         if limit:
             sql += f" LIMIT {int(limit)}"
@@ -506,7 +522,7 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
 
 def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 200):
     """补爬详情：从 items 里挑还没详情的 id（天然排重）。"""
-    rows = db.query("SELECT id FROM items WHERE id NOT IN (SELECT id FROM details)")
+    rows = db.query("SELECT id FROM videos WHERE detail_at IS NULL")
     ids = [r["id"] for r in rows]
     if not ids:
         print("详情已全部爬取")
@@ -540,7 +556,7 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
         lo = max(1, cur - chunk + 1)
         # 排重：剔除该区间内已有详情的 id
         have = {r["id"] for r in db.query(
-            "SELECT id FROM details WHERE id BETWEEN %s AND %s", (lo, cur))}
+            "SELECT id FROM videos WHERE detail_at IS NOT NULL AND id BETWEEN %s AND %s", (lo, cur))}
         ids = [i for i in range(cur, lo - 1, -1) if i not in have]
         g_skip += (cur - lo + 1) - len(ids)
         if ids:
@@ -557,7 +573,7 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
 def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
     """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。"""
     max_id = get_max_id()
-    have = int(db.query("SELECT MAX(id) AS m FROM items")[0]["m"] or 0)
+    have = int(db.query("SELECT MAX(id) AS m FROM videos")[0]["m"] or 0)
     if have == 0:
         print("[增量] 库为空，请先跑 --backfill 做全量，再用 --refresh 增量")
         return
