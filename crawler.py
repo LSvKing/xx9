@@ -210,12 +210,8 @@ _LIST_COLS = [
 _DETAIL_COLS = ["newAddr", "mp4", "playUrls", "groupNames", "statistics", "authorDetail", "detail_at"]
 _ALL_COLS = _LIST_COLS + _DETAIL_COLS
 
-# 列表写入：只填列表字段，已存在则跳过（不覆盖已抓到的详情/下载状态）
-_LIST_SQL = (
-    f"INSERT IGNORE INTO videos ({', '.join(_LIST_COLS)}) "
-    f"VALUES ({', '.join(['%s'] * len(_LIST_COLS))})"
-)
-# 详情写入：填全部字段，已存在则更新列表+详情字段（downloaded/download_path 不动，保留下载状态）
+# 写入：一次详情即一整行（列表+详情字段全有）。INSERT 全字段，已存在则更新
+# 列表+详情字段，但 downloaded/download_path 不动，保留下载状态。
 _DETAIL_SQL = (
     f"INSERT INTO videos ({', '.join(_ALL_COLS)}) "
     f"VALUES ({', '.join(['%s'] * len(_ALL_COLS))}) "
@@ -335,18 +331,6 @@ class DB:
         vod = (data.get("result") or {}).get("vod") or {}
         return cls._list_row(vod) + det
 
-    # --- 列表写入（INSERT IGNORE，不覆盖已有详情）---
-    def item_exists(self, iid: int) -> bool:
-        return bool(self.query("SELECT 1 FROM videos WHERE id=%s", (iid,)))
-
-    def insert_item(self, item: dict):
-        self.execute(_LIST_SQL, self._list_row(item))
-
-    def insert_items_batch(self, items: list) -> int:
-        """批量写列表字段，返回实际新增行数（INSERT IGNORE 去重）。"""
-        rows = [self._list_row(it) for it in items if it.get("id") is not None]
-        return self.executemany(_LIST_SQL, rows)
-
     def count_items(self) -> int:
         return self.query("SELECT COUNT(*) AS n FROM videos")[0]["n"]
 
@@ -448,42 +432,35 @@ def _fetch_detail(vid, retries: int = 4):
     return None
 
 
-def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
-                     write_items: bool, label: str):
+def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str):
     """并发抓 ids 的详情，批量写库（网络并发 / DB 写在主线程串行批量）。
-    write_items=True 时同时写 videos 的列表字段（回填用）。
+    一条详情即一整行 videos（列表字段+详情字段），insert_details_batch 一次写全。
     单条失败会重试，整轮结束后对仍失败的 id 再整体重试一轮。
     返回 (ok 成功, gap 空洞即已删除id, err 最终仍失败)。"""
     total = len(ids)
     done = ok = gap = 0
     failed = []
     start = time.time()
-    det_buf, item_buf = [], []
+    det_buf = []
 
     def flush():
-        nonlocal det_buf, item_buf
-        if write_items and item_buf:
-            db.insert_items_batch(item_buf); item_buf = []
+        nonlocal det_buf
         if det_buf:
             db.insert_details_batch(det_buf); det_buf = []
 
-    def consume(vid, data):
+    def consume(vid, data, show=True):
         nonlocal done, ok, gap
         done += 1
         if data is None:
             failed.append(vid)
+        elif (data.get("result") or {}).get("vod", {}).get("id"):
+            ok += 1
+            det_buf.append(data)
         else:
-            vod = (data.get("result") or {}).get("vod") or {}
-            if vod.get("id"):
-                ok += 1
-                det_buf.append(data)
-                if write_items:
-                    item_buf.append(vod)
-            else:
-                gap += 1
+            gap += 1
         if len(det_buf) >= batch:
             flush()
-        if done % 100 == 0 or done == total:
+        if show and (done % 100 == 0 or done == total):
             el = time.time() - start
             rate = done / el if el > 0 else 0
             eta = (total - done) / rate if rate > 0 else 0
@@ -503,18 +480,7 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
         time.sleep(5)
         with ThreadPoolExecutor(max_workers=max(2, workers // 2)) as pool:
             for vid, data in zip(retry_ids, pool.map(_fetch_detail, retry_ids)):
-                if data is None:
-                    failed.append(vid)
-                else:
-                    vod = (data.get("result") or {}).get("vod") or {}
-                    if vod.get("id"):
-                        ok += 1; det_buf.append(data)
-                        if write_items:
-                            item_buf.append(vod)
-                    else:
-                        gap += 1
-                if len(det_buf) >= batch:
-                    flush()
+                consume(vid, data, show=False)
         flush()
 
     print()
@@ -529,7 +495,7 @@ def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 2
         print("详情已全部爬取")
         return
     print(f"待爬详情: {len(ids)} 条, 并发{workers} 批量{batch}")
-    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=False, label="详情")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="详情")
     print(f"详情完成! 成功{ok} 空洞{gap} 失败{err}, 共 {db.count_details()} 条")
 
 
@@ -573,8 +539,7 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
         ids = [i for i in cand if i not in have]
         g_skip += len(cand) - len(ids)
         if ids:
-            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=True,
-                                            label=f"{lbl} {lo}-{cur}")
+            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label=f"{lbl} {lo}-{cur}")
             g_ok += ok; g_gap += gap; g_err += err
         db.set_progress(tag, lo, top, db.count_items())   # page=lo: 已回填到 lo
         print(f"[{lbl}] {lo}-{cur} 完成 | 累计 ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err} "
@@ -599,7 +564,7 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
         return
     ids = list(range(have + 1, max_id + 1))
     print(f"[增量] 库最大 id={have} -> 站点 maxId={max_id} | 新增 {len(ids)} 个待抓")
-    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=True, label="增量")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量")
     print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
 
 
