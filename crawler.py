@@ -471,6 +471,39 @@ def get_max_id() -> int:
     return int(r["data"][0]["id"])
 
 
+def preflight(workers: int = 5, samples: int = 20, min_rate: float = 0.7) -> bool:
+    """开抓前连通性自检：先取 maxId（测搜索接口+token），再并发抓一批样本详情，
+    统计成功率。FAT20001（已删除）也算连通成功；只有网络错/超时/非200算失败。
+    成功率低于 min_rate 返回 False（多半是本机出口 IP 被限速/封禁或代理不通）。"""
+    try:
+        max_id = get_max_id()
+    except Exception as e:
+        print(f"[自检] ✗ 连搜索接口都失败: {e}")
+        print("       → token 失效或代理/网络不通。先跑 fetch_creds 刷 token，或检查代理。")
+        return False
+    ids = [max_id - i for i in range(samples)]
+
+    def one(v):
+        try:
+            api_call(f"cms/vod/detail/{v}", method=1)   # 拿到响应即连通（含 FAT20001）
+            return True
+        except Exception:
+            return False
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(one, ids))
+    ok = sum(1 for r in results if r)
+    rate = ok / len(ids)
+    print(f"[自检] maxId={max_id} | 并发{workers} 样本{len(ids)} 成功{ok} 成功率{rate*100:.0f}%")
+    if rate < min_rate:
+        print(f"[自检] ⚠️ 成功率过低（<{int(min_rate*100)}%），本机出口 IP 可能被限速/封禁，或代理不稳。")
+        print("       建议任选一: ① 换代理节点  ② 换台机器跑（同一远程库，数据不影响）")
+        print(f"                  ③ 降并发重试，如 -w 2  ④ 等一会儿让限速恢复")
+        print("       要跳过自检强行跑加 --no-check")
+        return False
+    return True
+
+
 def _fetch_detail(vid, retries: int = 4):
     """抓单条详情，失败重试 + 退避。彻底失败返回 None。"""
     for att in range(retries):
@@ -843,6 +876,7 @@ def main():
     parser.add_argument("--refresh", action="store_true", help="增量：抓比库中最大 id 更新的新视频")
     parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
+    parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
     parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
     parser.add_argument("--from-curl", type=str, help="从浏览器 curl 命令提取 token 并更新 config")
     args = parser.parse_args()
@@ -868,16 +902,15 @@ def main():
             download_videos(db, args.workers)
             return
 
-        if args.backfill:
-            crawl_backfill(db, args.workers, args.batch)
-            return
-
-        if args.refresh:
-            crawl_refresh(db, args.workers, args.batch)
-            return
-
-        if args.detail and not args.tag and not args.all:
-            crawl_details(db, "__all__", args.workers, args.batch)
+        if args.backfill or args.refresh or (args.detail and not args.tag and not args.all):
+            if not args.no_check and not preflight(args.workers):
+                return
+            if args.backfill:
+                crawl_backfill(db, args.workers, args.batch)
+            elif args.refresh:
+                crawl_refresh(db, args.workers, args.batch)
+            else:
+                crawl_details(db, "__all__", args.workers, args.batch)
             return
 
         if args.all:
