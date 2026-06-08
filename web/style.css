@@ -31,13 +31,14 @@ header nav a.active { background: var(--acc); color: #fff; }
 /* 首页分组聚合 */
 #home { padding-bottom: 20px; }
 .theme { margin-top: 6px; }
-.theme h3 { padding: 14px 14px 8px; font-size: 15px; font-weight: 600; }
+.theme h3 { padding: 14px 14px 8px; font-size: 15px; font-weight: 600; cursor: pointer; display: inline-block; }
+.theme h3:hover { color: var(--acc); }
 .theme .row {
   display: flex; gap: 10px; overflow-x: auto; padding: 0 14px 6px;
   scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
 }
 .theme .row::-webkit-scrollbar { height: 0; }
-.theme .row .card { width: 150px; flex: 0 0 auto; scroll-snap-align: start; }
+.theme .row .card { width: 200px; flex: 0 0 auto; scroll-snap-align: start; }
 .card { background: var(--card); border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform .1s; }
 .card:hover { transform: translateY(-3px); }
 .thumb { position: relative; aspect-ratio: 16/10; background: #0a0c14; }
@@ -46,6 +47,11 @@ header nav a.active { background: var(--acc); color: #fff; }
 .card .title { padding: 8px 10px 4px; font-size: 13px; line-height: 1.35; max-height: 3.4em; overflow: hidden; }
 .card .sub { padding: 0 10px 9px; font-size: 11px; color: var(--mut); display: flex; justify-content: space-between; }
 .status { text-align: center; color: var(--mut); padding: 18px; }
+
+/* 专题面包屑 */
+.crumb { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; font-size: 14px; }
+.crumb .back { color: var(--acc); cursor: pointer; user-select: none; }
+.crumb span { color: var(--fg); font-weight: 600; }
 
 /* 遮罩通用 */
 .overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.85); }

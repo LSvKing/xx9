@@ -3,7 +3,7 @@ const $ = (s) => document.querySelector(s);
 const api = (p, opts) => fetch(p, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
 
 // 当前查询状态
-const state = { q: '', group: 0, sort: 'new', source: 'all', page: 1, loading: false, end: false };
+const state = { q: '', group: 0, theme: 0, sort: 'new', source: 'all', page: 1, loading: false, end: false };
 let imgSecret = '1';   // 图片是否 XOR 加密（从 /api/me 取）
 
 // 封面懒加载：进视口才拉，加密则 fetch+XOR 解密成 blob
@@ -53,7 +53,7 @@ async function load() {
   state.loading = true;
   $('#status').textContent = '加载中…';
   const p = new URLSearchParams({
-    q: state.q, group: state.group, sort: state.sort, source: state.source,
+    q: state.q, group: state.group, theme: state.theme, sort: state.sort, source: state.source,
     page: state.page, page_size: 30,
   });
   try {
@@ -98,9 +98,9 @@ function browse(patch) {
 let searchTimer;
 $('#search').addEventListener('input', e => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => browse({ q: e.target.value.trim(), v: null }), 350);
+  searchTimer = setTimeout(() => browse({ q: e.target.value.trim(), v: null, theme: null }), 350);
 });
-$('#group').onchange = e => browse({ g: +e.target.value, v: null });
+$('#group').onchange = e => browse({ g: +e.target.value, v: null, theme: null });
 $('#sort').onchange = e => browse({ sort: e.target.value, v: null });
 document.querySelectorAll('header nav a, .brand').forEach(a => {
   a.onclick = () => setHash({ source: a.dataset.source, v: null });
@@ -109,7 +109,7 @@ document.querySelectorAll('header nav a, .brand').forEach(a => {
 // ---------- hash 路由 ----------
 function parseHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { q: p.get('q') || '', source: p.get('source') || 'home', sort: p.get('sort') || 'new', g: +(p.get('g') || 0), v: p.get('v') || null };
+  return { q: p.get('q') || '', source: p.get('source') || 'home', sort: p.get('sort') || 'new', g: +(p.get('g') || 0), theme: +(p.get('theme') || 0), v: p.get('v') || null };
 }
 function setHash(patch) {
   const o = Object.assign(parseHash(), patch);
@@ -118,6 +118,7 @@ function setHash(patch) {
   if (o.source && o.source !== 'home') p.set('source', o.source);
   if (o.sort && o.sort !== 'new') p.set('sort', o.sort);
   if (o.g) p.set('g', o.g);
+  if (o.theme) p.set('theme', o.theme);
   if (o.v) p.set('v', o.v);
   const h = p.toString();
   if (h !== location.hash.slice(1)) location.hash = h; else route();
@@ -128,6 +129,7 @@ function syncControls(h) {
   document.querySelectorAll('header nav a').forEach(x => x.classList.toggle('active', x.dataset.source === h.source));
 }
 let curView = null;
+let themeMap = {};   // 专题 id->名，点专题进列表时面包屑显示用
 function route() {
   const h = parseHash();
   syncControls(h);
@@ -135,14 +137,22 @@ function route() {
   $('#home').classList.toggle('hidden', !isHome);
   $('#grid').classList.toggle('hidden', isHome);
   $('#status').classList.toggle('hidden', isHome);
+  renderCrumb(h);
   if (isHome) {
     if (curView !== 'home') { curView = 'home'; renderHome(); }
   } else {
-    const changed = h.q !== state.q || h.source !== state.source || h.sort !== state.sort || h.g !== state.group;
-    state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g;
+    const changed = h.q !== state.q || h.source !== state.source || h.sort !== state.sort || h.g !== state.group || h.theme !== state.theme;
+    state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g; state.theme = h.theme;
     if (curView !== 'grid' || changed) { curView = 'grid'; reset(); }
   }
   if (h.v) _openPlayer(+h.v); else _closePlayer();
+}
+function renderCrumb(h) {
+  const el = $('#crumb');
+  if (!h.theme || h.source === 'home') { el.classList.add('hidden'); return; }
+  el.innerHTML = `<a class="back">← 返回首页</a><span>专题 · ${esc(themeMap[h.theme] || '合集')}</span>`;
+  el.querySelector('.back').onclick = () => setHash({ source: 'home', theme: null, q: '', g: 0, v: null });
+  el.classList.remove('hidden');
 }
 window.addEventListener('hashchange', route);
 
@@ -156,7 +166,8 @@ async function renderHome() {
     for (const t of themes) {
       const sec = document.createElement('div');
       sec.className = 'theme';
-      sec.innerHTML = `<h3>${esc(t.title || '')}</h3><div class="row"></div>`;
+      sec.innerHTML = `<h3>${esc(t.title || '')} ›</h3><div class="row"></div>`;
+      sec.querySelector('h3').onclick = () => setHash({ source: 'all', theme: t.id, q: '', g: 0, v: null });
       const row = sec.querySelector('.row');
       for (const v of t.items) row.appendChild(card(v));
       home.appendChild(sec);
@@ -297,6 +308,8 @@ async function init() {
       $('#group').appendChild(o);
     }
   } catch (e) {}
+  // 专题字典（id->title），点专题进列表时面包屑显示专题名
+  try { themeMap = await api('/api/themes').then(r => r.json()); } catch (e) {}
   // 深链直接进视频时，垫一个历史条目，让后退能回上一层而不是退站
   if (parseHash().v) {
     const full = location.hash;

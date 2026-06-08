@@ -136,7 +136,7 @@ _SORT = {"new": "v.createTime DESC", "hot": "v.readNumber DESC", "long": "v.dura
 
 
 @app.get("/api/videos")
-def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
+def list_videos(q: str = "", tag: str = "", group: int = 0, theme: int = 0, sort: str = "new",
                 source: str = "all", page: int = 1, page_size: int = 30,
                 _=Depends(require_auth)):
     page = max(1, page)
@@ -149,6 +149,8 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
         where.append("JSON_CONTAINS(v.tags, %s)"); params.append(json.dumps(tag, ensure_ascii=False))
     if group:
         where.append("JSON_CONTAINS(v.`groups`, %s)"); params.append(str(group))
+    if theme:
+        where.append("JSON_CONTAINS(v.themes, %s)"); params.append(str(theme))
 
     if source == "fav":
         frm = "favorites s JOIN videos v ON v.id = s.video_id"
@@ -314,6 +316,12 @@ def home(_=Depends(require_auth)):
         except Exception:
             pass
     return _home["data"]
+
+
+@app.get("/api/themes")
+def themes_dict(_=Depends(require_auth)):
+    """专题字典 id->title，前端点专题进列表时显示专题名用（复用 theme_names 缓存）。"""
+    return theme_names()
 
 
 # 下载改由浏览器直连 CDN 完成（拉分片 + AES 解密 + 拼 .ts），不经后端，见 web/app.js
