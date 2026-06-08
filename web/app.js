@@ -178,7 +178,9 @@ function closePlayer() {                                  // × / Esc / 点外�
 async function _openPlayer(id) {
   if (curId === id && !$('#player').classList.contains('hidden')) return;  // 已在放同一个
   curId = id;
-  const v = await api('/api/video/' + id).then(r => r.json());
+  const res = await api('/api/video/' + id);
+  if (!res.ok) { curId = null; closePlayer(); alert('该视频暂不可用，可能已下架'); return; }
+  const v = await res.json();
   $('#p-title').textContent = v.title || '';
   $('#p-stats').textContent = `▶ ${fmtNum(v.readNumber)}  ♥ ${fmtNum(v.likeNumber)}  ·  ${fmtDate(v.createTime)}`;
   $('#p-tags').innerHTML = (v.tags || []).map(t => `<span>${esc(t)}</span>`).join('');

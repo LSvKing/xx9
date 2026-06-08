@@ -141,7 +141,7 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
                 _=Depends(require_auth)):
     page = max(1, page)
     page_size = min(max(page_size, 1), 100)
-    where = ["v.detail_at IS NOT NULL"]   # 只列有播放地址的
+    where = []
     params = []
     if q:
         where.append("v.title LIKE %s"); params.append(f"%{q}%")
@@ -160,9 +160,10 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
         frm = "videos v"
         order = _SORT.get(sort, _SORT["new"])
 
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = (f"SELECT v.id, v.title, v.vodPic, v.duration, v.author, v.authorAvatar, "
            f"v.readNumber, v.likeNumber, v.createTime "
-           f"FROM {frm} WHERE {' AND '.join(where)} ORDER BY {order} "
+           f"FROM {frm}{where_sql} ORDER BY {order} "
            f"LIMIT %s OFFSET %s")
     rows = db.query(sql, (*params, page_size, (page - 1) * page_size))
     items = [{
@@ -251,33 +252,41 @@ def groups(_=Depends(require_auth)):
 
 
 # ============================================================
-# 首页分组聚合（代理原站 theme/index，缓存 5 分钟）
+# 首页分组聚合（纯本地：按库内分类聚合，不碰原站，缓存 5 分钟）
 # ============================================================
 _home = {"t": 0.0, "data": []}
 
 
 @app.get("/api/home")
 def home(_=Depends(require_auth)):
+    """首页主题墙：数据全部取自本地 videos 表，按分类(groupNames)分组，
+    每组放最新若干条。只收录有播放地址(detail_at 非空)的视频 → 点开必能播。"""
     if time.time() - _home["t"] > 300 or not _home["data"]:
         try:
-            themes = []
-            for _ in range(3):                       # theme/index 偶发抖动，重试
-                r = c.api_call("theme/index", method=2, params={"osType": 3})
-                themes = r.get("data") or r.get("result") or []
-                if themes:
-                    break
-                time.sleep(0.5)
-            out = []
-            for t in themes:
-                items = [{
-                    "id": v.get("id"), "title": v.get("title"),
-                    "cover": pic_url(v.get("vodPic")),
-                    "duration": v.get("vodDuration") or v.get("duration") or 0,
-                    "readNumber": v.get("readNumber"),
-                    "createTime": v.get("createTime") or v.get("vodTime"),
-                } for v in (t.get("data") or []) if v.get("id")]
-                if items:
-                    out.append({"id": t.get("id"), "title": t.get("title"), "items": items})
+            rows = db.query(
+                "SELECT id, title, vodPic, duration, author, readNumber, likeNumber, "
+                "createTime, groupNames FROM videos "
+                "ORDER BY createTime DESC LIMIT 3000")
+            buckets = {}   # 分类id -> {id,title,items}；按 createTime 倒序填，每类留最新 12 条
+            for r in rows:
+                try:
+                    gs = json.loads(r.get("groupNames") or "[]")
+                except Exception:
+                    gs = []
+                for g in gs:
+                    if not isinstance(g, dict) or not g.get("id"):
+                        continue
+                    b = buckets.setdefault(g["id"], {"id": g["id"], "title": g.get("name") or "", "items": []})
+                    if len(b["items"]) < 12:
+                        b["items"].append({
+                            "id": r["id"], "title": r["title"],
+                            "cover": pic_url(r["vodPic"]),
+                            "duration": r["duration"], "author": r["author"],
+                            "readNumber": r["readNumber"], "createTime": r["createTime"],
+                        })
+            # 视频太少的分类不单独成块（避免单薄）；视频多的分类排前面
+            out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
+                         key=lambda b: len(b["items"]), reverse=True)
             if out:
                 _home["data"] = out
                 _home["t"] = time.time()
