@@ -88,36 +88,68 @@ window.addEventListener('scroll', () => {
   if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) load();
 });
 
-// ---------- 筛选控件 ----------
+// ---------- 筛选控件（都改 hash，由 route 应用）----------
 let searchTimer;
 $('#search').addEventListener('input', e => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { state.q = e.target.value.trim(); reset(); }, 350);
+  searchTimer = setTimeout(() => setHash({ q: e.target.value.trim(), v: null }), 350);
 });
-$('#group').onchange = e => { state.group = +e.target.value; reset(); };
-$('#sort').onchange = e => { state.sort = e.target.value; reset(); };
+$('#group').onchange = e => setHash({ g: +e.target.value });
+$('#sort').onchange = e => setHash({ sort: e.target.value });
 document.querySelectorAll('header nav a, .brand').forEach(a => {
-  a.onclick = () => {
-    state.source = a.dataset.source;
-    document.querySelectorAll('header nav a').forEach(x => x.classList.toggle('active', x.dataset.source === state.source));
-    reset();
-  };
+  a.onclick = () => setHash({ source: a.dataset.source, v: null });
 });
+
+// ---------- hash 路由 ----------
+function parseHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  return { q: p.get('q') || '', source: p.get('source') || 'all', sort: p.get('sort') || 'new', g: +(p.get('g') || 0), v: p.get('v') || null };
+}
+function setHash(patch) {
+  const o = Object.assign(parseHash(), patch);
+  const p = new URLSearchParams();
+  if (o.q) p.set('q', o.q);
+  if (o.source && o.source !== 'all') p.set('source', o.source);
+  if (o.sort && o.sort !== 'new') p.set('sort', o.sort);
+  if (o.g) p.set('g', o.g);
+  if (o.v) p.set('v', o.v);
+  const h = p.toString();
+  if (h !== location.hash.slice(1)) location.hash = h; else route();
+}
+function syncControls(h) {
+  if ($('#search').value !== h.q) $('#search').value = h.q;
+  $('#sort').value = h.sort; $('#group').value = h.g;
+  document.querySelectorAll('header nav a').forEach(x => x.classList.toggle('active', x.dataset.source === h.source));
+}
+function route() {
+  const h = parseHash();
+  syncControls(h);
+  if (h.q !== state.q || h.source !== state.source || h.sort !== state.sort || h.g !== state.group) {
+    state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g;
+    reset();
+  }
+  if (h.v) _openPlayer(+h.v); else _closePlayer();
+}
+window.addEventListener('hashchange', route);
 
 // ---------- 播放器 ----------
 let hls = null;
 const video = $('#video');
 let curId = null;
 
-async function openPlayer(id) {
+function openPlayer(id) { setHash({ v: id }); }          // 改 hash，由 route 打开
+function closePlayer() {                                  // × / Esc / 点外面
+  if (parseHash().v) history.back(); else _closePlayer(); // 退一格历史 → hashchange → 关
+}
+
+async function _openPlayer(id) {
+  if (curId === id && !$('#player').classList.contains('hidden')) return;  // 已在放同一个
   curId = id;
   const v = await api('/api/video/' + id).then(r => r.json());
   $('#p-title').textContent = v.title || '';
   $('#p-stats').textContent = `▶ ${fmtNum(v.readNumber)}  ♥ ${fmtNum(v.likeNumber)}`;
   $('#p-tags').innerHTML = (v.tags || []).map(t => `<span>${esc(t)}</span>`).join('');
-  $('#p-tags').querySelectorAll('span').forEach(s => s.onclick = () => {
-    closePlayer(); $('#search').value = s.textContent; state.q = s.textContent; reset();
-  });
+  $('#p-tags').querySelectorAll('span').forEach(s => s.onclick = () => setHash({ q: s.textContent, source: 'all', v: null }));
   const favBtn = $('#fav-btn');
   favBtn.classList.toggle('on', v.fav);
   favBtn.textContent = v.fav ? '★ 已收藏' : '☆ 收藏';
@@ -159,7 +191,9 @@ function playSource(src) {
   video.play().catch(() => {});
 }
 
-function closePlayer() {
+function _closePlayer() {
+  if ($('#player').classList.contains('hidden')) return;
+  curId = null;
   $('#player').classList.add('hidden');
   video.pause();
   if (hls) { hls.destroy(); hls = null; }
@@ -228,7 +262,18 @@ async function init() {
       $('#group').appendChild(o);
     }
   } catch (e) {}
+  // 应用初始 hash（分享链接里的筛选/视频）
+  const h = parseHash();
+  syncControls(h);
+  state.q = h.q; state.source = h.source; state.sort = h.sort; state.group = h.g;
   reset();
+  if (h.v) {
+    // 深链直接进视频时，垫一个网格历史，让后退能回列表而不是退站
+    const full = location.hash;
+    history.replaceState(null, '', location.pathname + location.search);
+    history.pushState(null, '', full);
+    _openPlayer(+h.v);
+  }
 }
 
 checkAuth();
