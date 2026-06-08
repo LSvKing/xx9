@@ -471,53 +471,88 @@ def get_max_id() -> int:
     return int(r["data"][0]["id"])
 
 
-def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
-                     write_items: bool, label: str):
-    """并发抓 ids 的详情，批量写库（网络并发 / DB 写在主线程串行批量）。
-    write_items=True 时同时写 items 表（回填用）。
-    返回 (ok 成功, gap 空洞即已删除id, err 请求失败)。"""
-    total = len(ids)
-    done = ok = gap = err = 0
-    start = time.time()
-    det_buf, item_buf = [], []
-
-    def fetch(vid):
+def _fetch_detail(vid, retries: int = 4):
+    """抓单条详情，失败重试 + 退避。彻底失败返回 None。"""
+    for att in range(retries):
         try:
             return api_call(f"cms/vod/detail/{vid}", method=1)
         except Exception:
-            return None
+            if att < retries - 1:
+                time.sleep(0.5 * (att + 1))   # 0.5/1/1.5s 退避
+    return None
+
+
+def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
+                     write_items: bool, label: str):
+    """并发抓 ids 的详情，批量写库（网络并发 / DB 写在主线程串行批量）。
+    write_items=True 时同时写 videos 的列表字段（回填用）。
+    单条失败会重试，整轮结束后对仍失败的 id 再整体重试一轮。
+    返回 (ok 成功, gap 空洞即已删除id, err 最终仍失败)。"""
+    total = len(ids)
+    done = ok = gap = 0
+    failed = []
+    start = time.time()
+    det_buf, item_buf = [], []
+
+    def flush():
+        nonlocal det_buf, item_buf
+        if write_items and item_buf:
+            db.insert_items_batch(item_buf); item_buf = []
+        if det_buf:
+            db.insert_details_batch(det_buf); det_buf = []
+
+    def consume(vid, data):
+        nonlocal done, ok, gap
+        done += 1
+        if data is None:
+            failed.append(vid)
+        else:
+            vod = (data.get("result") or {}).get("vod") or {}
+            if vod.get("id"):
+                ok += 1
+                det_buf.append(data)
+                if write_items:
+                    item_buf.append(vod)
+            else:
+                gap += 1
+        if len(det_buf) >= batch:
+            flush()
+        if done % 100 == 0 or done == total:
+            el = time.time() - start
+            rate = done / el if el > 0 else 0
+            eta = (total - done) / rate if rate > 0 else 0
+            print(f"\r  [{label}] {done}/{total} {done*100//max(total,1)}% | "
+                  f"ok{ok} 空洞{gap} 失败{len(failed)} | {rate:.1f}/s ETA{eta:.0f}s   ", end="", flush=True)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for data in pool.map(fetch, ids):     # 顺序产出，但已并发调度
-            done += 1
-            if data is None:
-                err += 1
-            else:
-                vod = (data.get("result") or {}).get("vod") or {}
-                if vod.get("id"):
-                    ok += 1
-                    det_buf.append(data)
-                    if write_items:
-                        item_buf.append(vod)
+        for vid, data in zip(ids, pool.map(_fetch_detail, ids)):
+            consume(vid, data)
+    flush()
+
+    # 收尾：对仍失败的 id 再整体重试一轮（多为限速/网络抖动，缓一下多半能成）
+    if failed:
+        retry_ids = failed[:]
+        failed.clear()
+        print(f"\n  [{label}] {len(retry_ids)} 个失败，缓 5s 后重试一轮 ...")
+        time.sleep(5)
+        with ThreadPoolExecutor(max_workers=max(2, workers // 2)) as pool:
+            for vid, data in zip(retry_ids, pool.map(_fetch_detail, retry_ids)):
+                if data is None:
+                    failed.append(vid)
                 else:
-                    gap += 1
-            if len(det_buf) >= batch:
-                if write_items:
-                    db.insert_items_batch(item_buf); item_buf = []
-                db.insert_details_batch(det_buf); det_buf = []
-            if done % 100 == 0 or done == total:
-                el = time.time() - start
-                rate = done / el if el > 0 else 0
-                eta = (total - done) / rate if rate > 0 else 0
-                print(f"\r  [{label}] {done}/{total} {done*100//max(total,1)}% | "
-                      f"ok{ok} 空洞{gap} err{err} | {rate:.1f}/s ETA{eta:.0f}s   ", end="", flush=True)
-    # 写余量
-    if write_items and item_buf:
-        db.insert_items_batch(item_buf)
-    if det_buf:
-        db.insert_details_batch(det_buf)
+                    vod = (data.get("result") or {}).get("vod") or {}
+                    if vod.get("id"):
+                        ok += 1; det_buf.append(data)
+                        if write_items:
+                            item_buf.append(vod)
+                    else:
+                        gap += 1
+                if len(det_buf) >= batch:
+                    flush()
+        flush()
+
     print()
-    return ok, gap, err
+    return ok, gap, len(failed)
 
 
 def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 200):
