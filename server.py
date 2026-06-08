@@ -190,9 +190,6 @@ def video_detail(vid: int, _=Depends(require_auth)):
         addr = next((p.get("addr") for p in play if p.get("addr")), None)
     except Exception:
         pass
-    if not addr:                          # 实时失败则回退库里（可能已过期）
-        play = json.loads(v.get("playUrls") or "[]")
-        addr = play[0].get("addr") if play else None
 
     # 同一签名地址套到各条线路（国线/海线），前端可切换
     pr = prefixes()

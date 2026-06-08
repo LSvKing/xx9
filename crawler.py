@@ -197,10 +197,7 @@ SCHEMA = [
         createTime BIGINT,
         vodTime BIGINT,
         crawled_at VARCHAR(32),
-        -- 详情字段
-        newAddr TEXT,
-        mp4 TEXT,
-        playUrls TEXT,
+        -- 详情字段（不存播放/下载地址，签名会过期，播放时实时取）
         groupNames TEXT,
         statistics TEXT,
         authorDetail TEXT,
@@ -228,7 +225,7 @@ _LIST_COLS = [
     "author", "authorId", "authorAvatar", "fansNum", "readNumber", "likeNumber",
     "comments", "tags", "`groups`", "themes", "createTime", "vodTime", "crawled_at",
 ]
-_DETAIL_COLS = ["newAddr", "mp4", "playUrls", "groupNames", "statistics", "authorDetail", "detail_at"]
+_DETAIL_COLS = ["groupNames", "statistics", "authorDetail", "detail_at"]
 _ALL_COLS = _LIST_COLS + _DETAIL_COLS
 
 # 写入：一次详情即一整行（列表+详情字段全有）。INSERT 全字段，已存在则更新
@@ -316,23 +313,16 @@ class DB:
 
     @staticmethod
     def _detail_part(data: dict):
-        """详情响应里的详情字段（7 列）；无 vod.id 返回 None（已删除/空洞）。"""
+        """详情里的稳定元数据；无 vod.id 返回 None（已删除/空洞）。
+        不存播放/下载地址（vodFullPlayUrl/mp4/newAddr）——它们带时间签名会过期，
+        播放时实时取（见 server.py /api/video）。"""
         vod = (data.get("result") or {}).get("vod") or {}
         if not vod.get("id"):
             return None
         author = (data.get("result") or {}).get("author") or {}
         stats = (data.get("result") or {}).get("statistics") or {}
         group_names = vod.get("group_names", []) or []
-        play_urls = vod.get("vodFullPlayUrl", [])
-        if isinstance(play_urls, str):
-            play_urls = [play_urls]
-        elif play_urls is None:
-            play_urls = []
-        play_urls_full = [{"addr": u.get("addr"), "type": u.get("type"),
-                           "duration": u.get("duration"), "size": u.get("size")} for u in play_urls]
         return (
-            vod.get("newAddr"), vod.get("mp4"),
-            json.dumps(play_urls_full, ensure_ascii=False),
             json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
                         for g in group_names], ensure_ascii=False),
             json.dumps(stats, ensure_ascii=False),
@@ -379,8 +369,8 @@ class DB:
 
     def get_undownloaded(self, limit=None) -> list:
         sql = """
-            SELECT id, title, playUrls FROM videos
-            WHERE downloaded = 0 AND playUrls IS NOT NULL
+            SELECT id, title FROM videos
+            WHERE downloaded = 0 AND detail_at IS NOT NULL
         """
         if limit:
             sql += f" LIMIT {int(limit)}"
@@ -607,11 +597,6 @@ def download_videos(db: DB, workers: int = 3):
     def download_one(row):
         vid = row["id"]
         title = re.sub(r'[\\/*?:"<>|]', "_", row["title"] or str(vid))[:40]
-        play_urls = json.loads(row["playUrls"] or "[]")
-        url = video_url(play_urls[0]["addr"]) if play_urls else None
-
-        if not url:
-            return
 
         out = os.path.join(dl_dir, f"{vid}.mp4")
         if os.path.exists(out):
@@ -620,10 +605,22 @@ def download_videos(db: DB, workers: int = 3):
                 done_count[0] += 1
             return
 
-        size = play_urls[0].get("size", 0) / 1024 / 1024 if play_urls else 0
+        # 播放地址带签名会过期，下载时实时取新鲜的
+        try:
+            d = api_call(f"cms/vod/detail/{vid}", method=1)
+            play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
+            addr = next((p.get("addr") for p in play if p.get("addr")), None)
+        except Exception:
+            addr = None
+        url = video_url(addr) if addr else None
+        if not url:
+            with lock:
+                fail_count[0] += 1
+            return
+
         with lock:
             done = done_count[0] + fail_count[0]
-            print(f"  [{done+1}/{total}] {title} ({size:.0f}MB) ...", end=" ", flush=True)
+            print(f"  [{done+1}/{total}] {title} ...", end=" ", flush=True)
 
         try:
             subprocess.run([
