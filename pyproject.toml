@@ -13,6 +13,8 @@ dependencies = [
     "itsdangerous>=2.1",
 ]
 
-# 不在此写死 pip 镜像（镜像是机器相关的：国内用清华、海外用默认 PyPI）。
-# 国内机器加速：export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-# 海外机器不设、走默认 PyPI 即可。
+# 国内镜像（清华），加速 uv sync / 依赖安装
+# 海外机器若连不上，用 uv sync --default-index https://pypi.org/simple 覆盖
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
