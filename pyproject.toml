@@ -10,5 +10,7 @@ dependencies = [
     "pymysql>=1.1",
 ]
 
-[tool.uv]
-dev-dependencies = []
+# 国内镜像（清华），加速 uv sync / 依赖安装
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
