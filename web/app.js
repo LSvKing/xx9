@@ -4,6 +4,27 @@ const api = (p, opts) => fetch(p, Object.assign({ headers: { 'Content-Type': 'ap
 
 // 当前查询状态
 const state = { q: '', group: 0, sort: 'new', source: 'all', page: 1, loading: false, end: false };
+let imgSecret = '1';   // 图片是否 XOR 加密（从 /api/me 取）
+
+// 封面懒加载：进视口才拉，加密则 fetch+XOR 解密成 blob
+const io = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    io.unobserve(e.target);
+    loadCover(e.target, e.target.dataset.cover);
+  }
+}, { rootMargin: '400px' });
+
+async function loadCover(img, url) {
+  if (!url) return;
+  if (imgSecret !== '1') { img.src = url; return; }
+  try {
+    const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const k = buf[0];
+    for (let i = 1; i < buf.length; i++) buf[i] ^= k;   // 每字节 XOR 首字节
+    img.src = URL.createObjectURL(new Blob([buf.slice(1)], { type: 'image/png' }));  // 丢首字节
+  } catch (e) { img.style.opacity = 0.2; }
+}
 
 // ---------- 登录 ----------
 async function checkAuth() {
@@ -51,12 +72,13 @@ function card(v) {
   el.className = 'card';
   el.innerHTML = `
     <div class="thumb">
-      <img loading="lazy" src="${v.cover}" onerror="this.style.opacity=.2">
+      <img class="cover" data-cover="${v.cover}">
       <span class="dur">${fmtDur(v.duration)}</span>
     </div>
     <div class="title">${esc(v.title || '')}</div>
     <div class="sub"><span>${esc(v.author || '')}</span><span>▶ ${fmtNum(v.readNumber)}</span></div>`;
   el.onclick = () => openPlayer(v.id);
+  io.observe(el.querySelector('img.cover'));
   return el;
 }
 const esc = (s) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -139,6 +161,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlayer(
 
 // ---------- 初始化 ----------
 async function init() {
+  try { imgSecret = (await api('/api/me').then(r => r.json())).img_secret || '1'; } catch (e) {}
   // 分类下拉
   try {
     const gs = await api('/api/groups').then(r => r.json());
