@@ -288,7 +288,10 @@ def home(_=Depends(require_auth)):
                 "createTime, themes FROM videos "
                 "ORDER BY createTime DESC LIMIT 3000")
             buckets = {}   # 专题id -> {id,title,items}；按 createTime 倒序填，每题留最新 12 条
+            used = set()   # 一个视频只进一个专题：避免「一片多标签」的最新视频霸占多个专题头部
             for r in rows:
+                if r["id"] in used:
+                    continue
                 try:
                     ts = json.loads(r.get("themes") or "[]")
                 except Exception:
@@ -300,13 +303,15 @@ def home(_=Depends(require_auth)):
                     if not name:               # 下架/隐藏专题，无名 → 跳过
                         continue
                     b = buckets.setdefault(tid, {"id": tid, "title": name, "items": []})
-                    if len(b["items"]) < 12:
+                    if len(b["items"]) < 12:    # 归入第一个未满的所属专题即停，自动均摊
                         b["items"].append({
                             "id": r["id"], "title": r["title"],
                             "cover": pic_url(r["vodPic"]),
                             "duration": r["duration"], "author": r["author"],
                             "readNumber": r["readNumber"], "createTime": r["createTime"],
                         })
+                        used.add(r["id"])
+                        break
             # 视频太少的专题不单独成块；视频多的专题排前面
             out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
                          key=lambda b: len(b["items"]), reverse=True)
