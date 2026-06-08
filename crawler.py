@@ -106,8 +106,6 @@ else:
     JWT_TOKEN = _cfg["jwt_token"]
     CREDS_SOURCE = "config.json（DB 无凭证，已回退）"
 
-PAGE_SIZE = 500   # 接口实测单页上限 500
-
 
 def aes_enc(key: str, plain: str) -> str:
     c = AES.new(key.encode(), AES.MODE_ECB)
@@ -398,38 +396,6 @@ class DB:
         if hasattr(self._local, "conn") and self._local.conn is not None:
             self._local.conn.close()
             self._local.conn = None
-
-
-def crawl_list(db: DB, tag: str, max_pages: int):
-    """按标签爬取"""
-    prog = db.get_progress(tag)
-    page = prog["page"] + 1
-    total = prog["total"]
-    while page <= max_pages:
-        try:
-            result = api_call("cms/vod/search", method=2, params={
-                "wd": tag, "page": page, "pageSize": PAGE_SIZE,
-            })
-        except Exception as e:
-            print(f"[{tag}] 第{page}页 请求失败: {e}")
-            time.sleep(5)
-            continue
-        if result.get("code") != "0000":
-            print(f"[{tag}] 第{page}页 错误: {result.get('message')}")
-            break
-        items = result.get("data", [])
-        total = result.get("total", 0)
-        if not items:
-            break
-        new_count = db.insert_items_batch(items)   # 整页一次写入，返回实际新增
-        collected = db.count_items()
-        db.set_progress(tag, page, total, collected)
-        print(f"[{tag}] 第{page}/{max_pages}页 新增{new_count}条 累计{collected}")
-        if len(items) < PAGE_SIZE:
-            break
-        page += 1
-        time.sleep(0.5)
-    print(f"[{tag}] 完成! 共 {db.count_items()} 条")
 
 
 def get_max_id() -> int:
@@ -845,10 +811,8 @@ def parse_curl_and_update(curl_cmd: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-t", "--tag", help="标签名")
-    parser.add_argument("-p", "--pages", type=int, default=50, help="最大页数")
     parser.add_argument("-d", "--detail-id", help="爬取单个详情")
-    parser.add_argument("--detail", action="store_true", help="爬完列表后继续爬详情")
+    parser.add_argument("--detail", action="store_true", help="补爬详情（从DB取未抓详情的id）")
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
     parser.add_argument("--backfill", action="store_true", help="全量回填：枚举 id 从大到小抓全站历史")
     parser.add_argument("--refresh", action="store_true", help="增量：抓比库中最大 id 更新的新视频")
@@ -881,7 +845,7 @@ def main():
             download_videos(db, args.workers)
             return
 
-        if args.backfill or args.refresh or (args.detail and not args.tag):
+        if args.backfill or args.refresh or args.detail:
             if not args.no_check and not preflight(args.workers):
                 return
             if args.backfill:
@@ -899,27 +863,23 @@ def main():
                 crawl_details(db, "__all__", args.workers, args.batch)
             return
 
-        if args.tag:
-            crawl_list(db, args.tag, args.pages)
-            if args.detail:
-                crawl_details(db, args.tag, args.workers, args.batch)
-        else:
-            print("=" * 50)
-            print("主播视频爬虫 - 两阶段模式")
-            print("=" * 50)
-            print(f"数据库: MySQL {MYSQL['host']}:{MYSQL['port']}/{MYSQL['database']}")
-            print(f"域名/token 来源: {CREDS_SOURCE}")
-            print(f"  api_base: {API_BASE}")
-            print(f"已收集: {db.count_items()} 条视频, {db.count_details()} 有详情, {db.count_downloaded()} 已下载")
-            print()
-            print("阶段1 - 爬取信息:")
-            print("  python crawler.py --backfill                    # 全量回填(枚举id，抓全站114万历史)")
-            print("  python crawler.py --backfill --shard 3/10       # 分片回填(多机并行用)")
-            print("  python crawler.py --refresh                     # 增量(只抓比库里更新的新视频)")
-            print("  python crawler.py --detail                      # 独立补爬详情(从DB取未抓详情的)")
-            print()
-            print("阶段2 - 下载视频:")
-            print("  python crawler.py --download                     # 下载所有未下载的")
+        # 无参数：打印状态和用法菜单
+        print("=" * 50)
+        print("主播视频爬虫 - MySQL 版本")
+        print("=" * 50)
+        print(f"数据库: MySQL {MYSQL['host']}:{MYSQL['port']}/{MYSQL['database']}")
+        print(f"域名/token 来源: {CREDS_SOURCE}")
+        print(f"  api_base: {API_BASE}")
+        print(f"已收集: {db.count_items()} 条视频, {db.count_details()} 有详情, {db.count_downloaded()} 已下载")
+        print()
+        print("阶段1 - 爬取信息:")
+        print("  python crawler.py --backfill                    # 全量回填(枚举id，抓全站114万历史)")
+        print("  python crawler.py --backfill --shard 3/10       # 分片回填(多机并行用)")
+        print("  python crawler.py --refresh                     # 增量(只抓比库里更新的新视频)")
+        print("  python crawler.py --detail                      # 独立补爬详情(从DB取未抓详情的)")
+        print()
+        print("阶段2 - 下载视频:")
+        print("  python crawler.py --download                     # 下载所有未下载的")
     finally:
         db.close()
 
