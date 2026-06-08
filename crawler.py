@@ -650,148 +650,6 @@ def download_videos(db: DB, workers: int = 3):
     print(f"下载完成! 成功 {done_count[0]}, 失败 {fail_count[0]}, 共 {db.count_downloaded()} 已下载")
 
 
-# 备用 API 域名列表（从 app.js 中提取，自动尝试）
-FALLBACK_DOMAINS = [
-    "https://api.1d1bzspqmi46l.xyz",
-    "https://0ncp0kjmhys5dzj.xyz",
-    "https://5z3ffttoao467bc.xyz",
-    "https://6qdy0xioq0d39hm.xyz",
-    "https://c6sukj22g0f6zg7.xyz",
-    "https://co2rwy7os281b0e.xyz",
-    "https://ep3wmwhk45uhmx9.xyz",
-    "https://fezpo48v7eod18x.xyz",
-    "https://gdkm8yb00u3rxdm.xyz",
-    "https://k4byju9ljsh8aza.xyz",
-    "https://k4irke3n6xcwdpc.xyz",
-    "https://1cjvr80fr3f7.xyz",
-    "https://93l9cunfmoc1.xyz",
-    "https://6rl8a5qg0y7m.xyz",
-    "https://p9nwmo3jdquv.xyz",
-    "https://5idytkrilig6.xyz",
-    "https://y9ao7140l9ui.xyz",
-    "https://k5p0vw2fgfvc.xyz",
-    "https://mr5qvcc0k438.xyz",
-    "https://agnuprlu6fhz.xyz",
-    "https://ak8ib5fyxtww.xyz",
-]
-
-
-def update_config():
-    """更新 token/域名 到 config.json - 自动从 app.js 提取所有域名"""
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-    cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
-    frontend = cfg.get("frontend", "https://rw345o29u6ivj.xyz")
-
-    # 1. 从前端页面下载 app.js 提取所有域名
-    print(f"从 {frontend} 提取域名列表...")
-    domains = set()
-    try:
-        html = requests.get(f"{frontend}/enter", timeout=10,
-                            headers={"user-agent": "Mozilla/5.0"}).text
-        js_url = re.search(r'src="([^"]*app[^"]*\.js)"', html)
-        if js_url:
-            js_full = js_url.group(1)
-            if not js_full.startswith("http"):
-                js_full = frontend + "/" + js_full.lstrip("./")
-            print(f"  下载 app.js: {js_full}")
-            js_code = requests.get(js_full, timeout=15).text
-            domains.update(re.findall(r'https?://[a-zA-Z0-9.-]+\.(?:xyz|top)', js_code))
-    except Exception as e:
-        print(f"  提取失败: {e}")
-
-    # 2. 加上 api.子域名变体
-    api_variants = set()
-    for d in list(domains):
-        host = re.sub(r'https?://', '', d)
-        api_variants.add(f"https://api.{host}")
-        # 也去掉前缀子域名试
-        if not host.startswith('api.'):
-            api_variants.add(f"https://api.{host}")
-    domains.update(api_variants)
-
-    print(f"  共 {len(domains)} 个待测域名")
-
-    # 3. 逐个测试
-    found = False
-    for domain in sorted(domains):
-        print(f"  检测: {domain} ...", end=" ", flush=True)
-        try:
-            ts = int(time.time() * 1000)
-            key = KEYS[ts % 10]
-            bp = json.dumps({"method": 1, "params": {}, "uri": "app/jwt-token"}, separators=(",", ":"))
-            c = AES.new(key.encode(), AES.MODE_ECB)
-            ed = base64.b64encode(c.encrypt(pad(bp.encode(), 16))).decode()
-            resp = requests.post(
-                f"{domain}/fast-endecode/main/request",
-                json={"data": ed, "time": ts}, timeout=10,
-                headers={"accept": "application/json", "origin": frontend,
-                         "user-agent": "Mozilla/5.0"})
-            if resp.status_code == 200 and resp.json().get("data"):
-                d = resp.json()
-                rk = KEYS[d["time"] % 10]
-                c2 = AES.new(rk.encode(), AES.MODE_ECB)
-                inner = json.loads(unpad(c2.decrypt(base64.b64decode(d["data"])), 16))
-                token = inner.get("accessToken") or inner.get("jwtToken")
-                if token:
-                    print("✅")
-                    cfg["api_base"] = domain
-                    cfg["jwt_token"] = token
-                    cfg["access_token"] = inner.get("accessToken", "")
-                    found = True
-                    break
-            print(f"HTTP {resp.status_code}")
-        except requests.Timeout:
-            print("超时")
-        except Exception as e:
-            print(f"失败 ({str(e)[:50]})")
-
-    if found:
-        with open(config_path, "w") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        print(f"\n已更新 config.json:")
-        print(f"  api_base:  {cfg['api_base']}")
-        print(f"  jwt_token: {cfg['jwt_token'][:50]}...")
-    else:
-        print("\n所有域名均不可用，请检查网络或手动更新 config.json")
-
-
-def parse_curl_and_update(curl_cmd: str):
-    """从浏览器复制的 curl 命令中提取 token/域名，更新 config.json"""
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-    cfg = json.load(open(config_path)) if os.path.exists(config_path) else {}
-
-    # 提取 URL 中的域名
-    url_match = re.search(r"(https?://[a-zA-Z0-9.-]+\.[a-z]+)/", curl_cmd.replace("\\", ""))
-    if url_match:
-        domain = url_match.group(1)
-        # 如果不是 api. 开头，只当 frontend 用
-        if "api." not in domain:
-            cfg["frontend"] = domain
-            print(f"frontend: {domain}")
-        else:
-            cfg["api_base"] = domain
-            print(f"api_base: {domain}")
-
-    # 提取 header 值
-    for field, key in [("accesstoken", "access_token"), ("jwttoken", "jwt_token"), ("origin", "frontend")]:
-        m = re.search(rf"-H\s+'?{field}:\s*['\"]?(\S+?)['\"]?\s*$", curl_cmd, re.I | re.M) or \
-           re.search(rf"{field}:\s*['\"]?(\S+?)['\"]?", curl_cmd, re.I)
-        if m:
-            val = m.group(1).rstrip("'\"")
-            if key == "frontend":
-                val = val.rstrip("/")
-            cfg[key] = val
-            print(f"{key}: {val[:50]}...")
-
-    # 尝试提取 origin 对应的前端域名（去掉路径）
-    if cfg.get("frontend"):
-        cfg["frontend"] = re.sub(r'/.*', '', cfg["frontend"])
-
-    with open(config_path, "w") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    print(f"\nconfig.json 已更新")
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--detail-id", help="爬取单个详情")
@@ -803,21 +661,11 @@ def main():
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
     parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
-    parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
-    parser.add_argument("--from-curl", type=str, help="从浏览器 curl 命令提取 token 并更新 config")
     args = parser.parse_args()
 
     db = DB()
 
     try:
-        if args.from_curl:
-            parse_curl_and_update(args.from_curl)
-            return
-
-        if args.update:
-            update_config()
-            return
-
         if args.detail_id:
             data = api_call(f"cms/vod/detail/{args.detail_id}", method=1)
             db.insert_detail(data)
