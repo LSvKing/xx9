@@ -62,17 +62,52 @@ def _load_config():
                 defaults[k] = cfg[k]
     return defaults
 
+def _load_creds_from_db(mysql_cfg: dict):
+    """从 MySQL credentials 表取最新一条域名/token（fetch_creds.py 写入的）。
+    取不到（库/表不存在、连不上、表为空）返回 None，调用方回退 config.json。"""
+    try:
+        conn = pymysql.connect(
+            host=mysql_cfg["host"], port=int(mysql_cfg.get("port", 3306)),
+            user=mysql_cfg["user"], password=mysql_cfg.get("password", ""),
+            database=mysql_cfg["database"], charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor, connect_timeout=5,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT api_base, frontend, media_base, access_token, jwt_token, captured_at "
+                    "FROM credentials ORDER BY id DESC LIMIT 1"
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 _cfg = _load_config()
-API_BASE = _cfg["api_base"]
-API_PATH = "/fast-endecode/main/request"
-FRONTEND = _cfg["frontend"]
-MEDIA_BASE = _cfg["media_base"]
 MYSQL = _cfg["mysql"]
-ACCESS_TOKEN = _cfg["access_token"]
-JWT_TOKEN = _cfg["jwt_token"]
+API_PATH = "/fast-endecode/main/request"
 KEYS = _cfg["keys"]
 
-PAGE_SIZE = 20
+# 域名/token 优先用 MySQL credentials 表里最新一条；取不到则回退 config.json
+_creds = _load_creds_from_db(MYSQL)
+if _creds and _creds.get("api_base"):
+    API_BASE = _creds["api_base"] or _cfg["api_base"]
+    FRONTEND = _creds["frontend"] or _cfg["frontend"]
+    MEDIA_BASE = _creds.get("media_base") or _cfg["media_base"]
+    ACCESS_TOKEN = _creds["access_token"] or _cfg["access_token"]
+    JWT_TOKEN = _creds["jwt_token"] or _cfg["jwt_token"]
+    CREDS_SOURCE = "MySQL credentials 表 @ " + str(_creds.get("captured_at", ""))[:19]
+else:
+    API_BASE = _cfg["api_base"]
+    FRONTEND = _cfg["frontend"]
+    MEDIA_BASE = _cfg["media_base"]
+    ACCESS_TOKEN = _cfg["access_token"]
+    JWT_TOKEN = _cfg["jwt_token"]
+    CREDS_SOURCE = "config.json（DB 无凭证，已回退）"
+
+PAGE_SIZE = 500   # 接口实测单页上限 500
 
 
 def aes_enc(key: str, plain: str) -> str:
@@ -138,7 +173,7 @@ SCHEMA = [
         likeNumber INT,
         comments INT,
         tags TEXT,
-        groups TEXT,
+        `groups` TEXT,
         themes TEXT,
         createTime BIGINT,
         vodTime BIGINT,
@@ -216,57 +251,71 @@ class DB:
             with self.conn.cursor() as cur:
                 cur.execute(sql, params)
 
+    def executemany(self, sql: str, rows: list) -> int:
+        """批量写入，一次往返 + 一次提交，返回受影响行数。"""
+        if not rows:
+            return 0
+        with self._lock:
+            with self.conn.cursor() as cur:
+                cur.executemany(sql, rows)
+                return cur.rowcount
+
     def _init_schema(self):
         for ddl in SCHEMA:
             self.execute(ddl)
 
     # --- items ---
+    _ITEM_SQL = """
+        INSERT IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
+            author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
+            tags, `groups`, themes, createTime, vodTime, crawled_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    @staticmethod
+    def _item_row(item: dict) -> tuple:
+        a = item.get("authors", {}) or {}
+        return (
+            item.get("id"), item.get("vodId"), item.get("title"),
+            item.get("vodDuration"), item.get("vodVersion"), item.get("vodPic"),
+            item.get("gif"), item.get("preview"),
+            a.get("nickName"), a.get("id"), a.get("avatar"), a.get("fansNum"),
+            item.get("readNumber"), item.get("likeNumber"), item.get("comments"),
+            json.dumps(item.get("tags"), ensure_ascii=False),
+            json.dumps(item.get("groups")), json.dumps(item.get("themes")),
+            item.get("createTime"), item.get("vodTime"), datetime.now().isoformat(),
+        )
+
     def item_exists(self, iid: int) -> bool:
         return bool(self.query("SELECT 1 FROM items WHERE id=%s", (iid,)))
 
     def insert_item(self, item: dict):
-        a = item.get("authors", {}) or {}
-        self.execute("""
-            INSERT IGNORE INTO items (id, vodId, title, duration, quality, vodPic, gif, preview,
-                author, authorId, authorAvatar, fansNum, readNumber, likeNumber, comments,
-                tags, groups, themes, createTime, vodTime, crawled_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            item.get("id"),
-            item.get("vodId"),
-            item.get("title"),
-            item.get("vodDuration"),
-            item.get("vodVersion"),
-            item.get("vodPic"),
-            item.get("gif"),
-            item.get("preview"),
-            a.get("nickName"),
-            a.get("id"),
-            a.get("avatar"),
-            a.get("fansNum"),
-            item.get("readNumber"),
-            item.get("likeNumber"),
-            item.get("comments"),
-            json.dumps(item.get("tags"), ensure_ascii=False),
-            json.dumps(item.get("groups")),
-            json.dumps(item.get("themes")),
-            item.get("createTime"),
-            item.get("vodTime"),
-            datetime.now().isoformat(),
-        ))
+        self.execute(self._ITEM_SQL, self._item_row(item))
+
+    def insert_items_batch(self, items: list) -> int:
+        """批量插入列表项，返回实际新增行数（INSERT IGNORE 自动去重）。"""
+        rows = [self._item_row(it) for it in items if it.get("id") is not None]
+        return self.executemany(self._ITEM_SQL, rows)
 
     def count_items(self) -> int:
         return self.query("SELECT COUNT(*) AS n FROM items")[0]["n"]
 
     # --- details ---
-    def detail_exists(self, iid: int) -> bool:
-        return bool(self.query("SELECT 1 FROM details WHERE id=%s", (iid,)))
+    _DETAIL_SQL = """
+        REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
+            statistics, authorDetail, detail_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
 
-    def insert_detail(self, data: dict):
-        vod = data.get("result", {}).get("vod", {})
-        author = data.get("result", {}).get("author", {})
-        stats = data.get("result", {}).get("statistics", {})
-        group_names = vod.get("group_names", [])
+    @staticmethod
+    def _detail_row(data: dict):
+        """从详情响应构造 details 行；无 vod.id 返回 None（已删除/空洞）。"""
+        vod = (data.get("result") or {}).get("vod") or {}
+        if not vod.get("id"):
+            return None
+        author = (data.get("result") or {}).get("author") or {}
+        stats = (data.get("result") or {}).get("statistics") or {}
+        group_names = vod.get("group_names", []) or []
 
         play_urls = vod.get("vodFullPlayUrl", [])
         if isinstance(play_urls, str):
@@ -275,27 +324,30 @@ class DB:
             play_urls = []
         play_urls_full = [{"addr": u.get("addr"), "type": u.get("type"),
                            "duration": u.get("duration"), "size": u.get("size")} for u in play_urls]
-
-        self.execute("""
-            REPLACE INTO details (id, newAddr, mp4, playUrls, groupNames,
-                statistics, authorDetail, detail_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            vod.get("id"),
-            vod.get("newAddr"),
-            vod.get("mp4"),
+        return (
+            vod.get("id"), vod.get("newAddr"), vod.get("mp4"),
             json.dumps(play_urls_full, ensure_ascii=False),
             json.dumps([{"id": g["id"], "name": g.get("groupName"), "desc": g.get("description")}
                         for g in group_names], ensure_ascii=False),
             json.dumps(stats, ensure_ascii=False),
             json.dumps({
-                "nickName": author.get("nickName"),
-                "avatar": author.get("avatar"),
-                "introduce": author.get("introduce"),
-                "fansNum": author.get("fansNum"),
+                "nickName": author.get("nickName"), "avatar": author.get("avatar"),
+                "introduce": author.get("introduce"), "fansNum": author.get("fansNum"),
             }, ensure_ascii=False),
             datetime.now().isoformat(),
-        ))
+        )
+
+    def detail_exists(self, iid: int) -> bool:
+        return bool(self.query("SELECT 1 FROM details WHERE id=%s", (iid,)))
+
+    def insert_detail(self, data: dict):
+        row = self._detail_row(data)
+        if row:
+            self.execute(self._DETAIL_SQL, row)
+
+    def insert_details_batch(self, data_list: list) -> int:
+        rows = [r for r in (self._detail_row(d) for d in data_list) if r]
+        return self.executemany(self._DETAIL_SQL, rows)
 
     def count_details(self) -> int:
         return self.query("SELECT COUNT(*) AS n FROM details")[0]["n"]
@@ -354,10 +406,7 @@ def crawl_list(db: DB, tag: str, max_pages: int):
         total = result.get("total", 0)
         if not items:
             break
-        new_count = sum(1 for it in items if not db.item_exists(it.get("id")))
-        for item in items:
-            if not db.item_exists(item.get("id")):
-                db.insert_item(item)
+        new_count = db.insert_items_batch(items)   # 整页一次写入，返回实际新增
         collected = db.count_items()
         db.set_progress(tag, page, total, collected)
         print(f"[{tag}] 第{page}/{max_pages}页 新增{new_count}条 累计{collected}")
@@ -389,10 +438,7 @@ def crawl_all(db: DB):
         total = result.get("total", 0)
         if not items:
             break
-        new_count = sum(1 for it in items if not db.item_exists(it.get("id")))
-        for item in items:
-            if not db.item_exists(item.get("id")):
-                db.insert_item(item)
+        new_count = db.insert_items_batch(items)   # 整页一次写入，返回实际新增
         collected = db.count_items()
         db.set_progress(tag, page, total, collected)
         print(f"[全站] 第{page}页 新增{new_count}条 累计{collected}/{total} 进度{collected*100//max(total,1)}%")
@@ -403,56 +449,129 @@ def crawl_all(db: DB):
     print(f"[全站] 完成! 共 {db.count_items()} 条")
 
 
-def crawl_details(db: DB, tag: str, workers: int = 5):
-    rows = db.query("""
-        SELECT id, title FROM items
-        WHERE id NOT IN (SELECT id FROM details)
-    """)
+def get_max_id() -> int:
+    """当前站点最大视频 id（搜索第1页第1条，按时间倒序）。"""
+    r = api_call("cms/vod/search", method=2, params={"wd": "", "page": 1, "pageSize": 1})
+    return int(r["data"][0]["id"])
 
-    todo = [dict(r) for r in rows]
-    if not todo:
-        print(f"详情已全部爬取")
-        return
 
-    total = len(todo)
-    print(f"待爬详情: {total} 条, 并发: {workers}")
-
-    done = [0]; err = [0]; lock = threading.Lock()
-    active = [0]  # 当前活跃线程数
+def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int,
+                     write_items: bool, label: str):
+    """并发抓 ids 的详情，批量写库（网络并发 / DB 写在主线程串行批量）。
+    write_items=True 时同时写 items 表（回填用）。
+    返回 (ok 成功, gap 空洞即已删除id, err 请求失败)。"""
+    total = len(ids)
+    done = ok = gap = err = 0
     start = time.time()
+    det_buf, item_buf = [], []
 
-    def fetch_one(row):
-        vid = row["id"]
-        with lock:
-            active[0] += 1
+    def fetch(vid):
         try:
-            data = api_call(f"cms/vod/detail/{vid}", method=1)
-            db.insert_detail(data)
-            with lock:
-                done[0] += 1
-                active[0] -= 1
-                n = done[0] + err[0]
-                elapsed = time.time() - start
-                rate = n / elapsed if elapsed > 0 else 0
-                eta = (total - n) / rate if rate > 0 else 0
-                print(f"\r  [{n}/{total}] {n*100//total}% | {rate:.1f}条/s | 活跃{active[0]} | ETA {eta:.0f}s  ", end="", flush=True)
-            return True
+            return api_call(f"cms/vod/detail/{vid}", method=1)
         except Exception:
-            with lock:
-                err[0] += 1
-                active[0] -= 1
-                n = done[0] + err[0]
-                print(f"\r  [{n}/{total}] {n*100//total}% | err={err[0]}                                    ", flush=True)
-            time.sleep(1)
-            return False
+            return None
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(fetch_one, r): r for r in todo}
-        for _ in as_completed(futures):
-            pass
+        for data in pool.map(fetch, ids):     # 顺序产出，但已并发调度
+            done += 1
+            if data is None:
+                err += 1
+            else:
+                vod = (data.get("result") or {}).get("vod") or {}
+                if vod.get("id"):
+                    ok += 1
+                    det_buf.append(data)
+                    if write_items:
+                        item_buf.append(vod)
+                else:
+                    gap += 1
+            if len(det_buf) >= batch:
+                if write_items:
+                    db.insert_items_batch(item_buf); item_buf = []
+                db.insert_details_batch(det_buf); det_buf = []
+            if done % 100 == 0 or done == total:
+                el = time.time() - start
+                rate = done / el if el > 0 else 0
+                eta = (total - done) / rate if rate > 0 else 0
+                print(f"\r  [{label}] {done}/{total} {done*100//max(total,1)}% | "
+                      f"ok{ok} 空洞{gap} err{err} | {rate:.1f}/s ETA{eta:.0f}s   ", end="", flush=True)
+    # 写余量
+    if write_items and item_buf:
+        db.insert_items_batch(item_buf)
+    if det_buf:
+        db.insert_details_batch(det_buf)
+    print()
+    return ok, gap, err
 
-    elapsed = time.time() - start
-    print(f"\n详情完成! 成功 {done[0]}, 失败 {err[0]}, 共 {db.count_details()} 条, 耗时 {elapsed:.0f}s")
+
+def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 200):
+    """补爬详情：从 items 里挑还没详情的 id（天然排重）。"""
+    rows = db.query("SELECT id FROM items WHERE id NOT IN (SELECT id FROM details)")
+    ids = [r["id"] for r in rows]
+    if not ids:
+        print("详情已全部爬取")
+        return
+    print(f"待爬详情: {len(ids)} 条, 并发{workers} 批量{batch}")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=False, label="详情")
+    print(f"详情完成! 成功{ok} 空洞{gap} 失败{err}, 共 {db.count_details()} 条")
+
+
+def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000):
+    """全量回填：从当前最大 id 往下枚举到 1，逐个取详情，同时写 items+details。
+    - 排重：每块先剔除已抓过(已有 details)的 id，不重复请求
+    - 断点续传：progress(__backfill__).page = 已回填到的最低 id
+    """
+    tag = "__backfill__"
+    prog = db.get_progress(tag)
+    if prog["page"]:
+        next_id = prog["page"] - 1
+        top = prog["total"] or next_id
+    else:
+        top = get_max_id()
+        next_id = top
+    if next_id < 1:
+        print("[回填] 已完成（已到 id=1）")
+        return
+    print(f"[回填] 起始 maxId={top} | 从 id={next_id} 往下到 1 | 并发{workers} 批量{batch} 块{chunk}")
+
+    g_ok = g_gap = g_err = g_skip = 0
+    cur = next_id
+    while cur >= 1:
+        lo = max(1, cur - chunk + 1)
+        # 排重：剔除该区间内已有详情的 id
+        have = {r["id"] for r in db.query(
+            "SELECT id FROM details WHERE id BETWEEN %s AND %s", (lo, cur))}
+        ids = [i for i in range(cur, lo - 1, -1) if i not in have]
+        g_skip += (cur - lo + 1) - len(ids)
+        if ids:
+            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=True,
+                                            label=f"回填{lo}-{cur}")
+            g_ok += ok; g_gap += gap; g_err += err
+        db.set_progress(tag, lo, top, db.count_items())   # page=lo: 已回填到 lo
+        print(f"[回填] {lo}-{cur} 完成 | 累计 ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err} "
+              f"| items={db.count_items()}")
+        cur = lo - 1
+    print(f"[回填] 全部完成! ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err}")
+
+
+def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
+    """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。"""
+    max_id = get_max_id()
+    have = int(db.query("SELECT MAX(id) AS m FROM items")[0]["m"] or 0)
+    if have == 0:
+        print("[增量] 库为空，请先跑 --backfill 做全量，再用 --refresh 增量")
+        return
+    if max_id <= have:
+        print(f"[增量] 无新数据（库最大 id={have}, 站点 maxId={max_id}）")
+        return
+    gap = max_id - have
+    if gap > 50000:
+        print(f"[增量] 与站点差距过大（{gap} 个 id），这不是增量场景，请用 --backfill")
+        return
+    ids = list(range(have + 1, max_id + 1))
+    print(f"[增量] 库最大 id={have} -> 站点 maxId={max_id} | 新增 {len(ids)} 个待抓")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=True, label="增量")
+    print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
 
 
 def download_videos(db: DB, workers: int = 3):
@@ -668,7 +787,10 @@ def main():
     parser.add_argument("-d", "--detail-id", help="爬取单个详情")
     parser.add_argument("--detail", action="store_true", help="爬完列表后继续爬详情")
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
-    parser.add_argument("--all", action="store_true", help="全站抓取")
+    parser.add_argument("--all", action="store_true", help="全站抓取（列表，仅最新1万条）")
+    parser.add_argument("--backfill", action="store_true", help="全量回填：枚举 id 从大到小抓全站历史")
+    parser.add_argument("--refresh", action="store_true", help="增量：抓比库中最大 id 更新的新视频")
+    parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
     parser.add_argument("--from-curl", type=str, help="从浏览器 curl 命令提取 token 并更新 config")
@@ -695,30 +817,42 @@ def main():
             download_videos(db, args.workers)
             return
 
+        if args.backfill:
+            crawl_backfill(db, args.workers, args.batch)
+            return
+
+        if args.refresh:
+            crawl_refresh(db, args.workers, args.batch)
+            return
+
         if args.detail and not args.tag and not args.all:
-            crawl_details(db, "__all__", args.workers)
+            crawl_details(db, "__all__", args.workers, args.batch)
             return
 
         if args.all:
             crawl_all(db)
             if args.detail:
-                crawl_details(db, "__all__", args.workers)
+                crawl_details(db, "__all__", args.workers, args.batch)
             return
 
         if args.tag:
             crawl_list(db, args.tag, args.pages)
             if args.detail:
-                crawl_details(db, args.tag, args.workers)
+                crawl_details(db, args.tag, args.workers, args.batch)
         else:
             print("=" * 50)
             print("主播视频爬虫 - 两阶段模式")
             print("=" * 50)
             print(f"数据库: MySQL {MYSQL['host']}:{MYSQL['port']}/{MYSQL['database']}")
+            print(f"域名/token 来源: {CREDS_SOURCE}")
+            print(f"  api_base: {API_BASE}")
             print(f"已收集: {db.count_items()} 列表项, {db.count_details()} 详情, {db.count_downloaded()} 已下载")
             print()
             print("阶段1 - 爬取信息:")
-            print("  python crawler.py --all                         # 全站抓取列表")
-            print("  python crawler.py --all --detail                # 全站抓取列表+详情")
+            print("  python crawler.py --backfill                    # 全量回填(枚举id，抓全站114万历史)")
+            print("  python crawler.py --refresh                     # 增量(只抓比库里更新的新视频)")
+            print("  python crawler.py --all                         # 全站列表(仅最新1万条)")
+            print("  python crawler.py --all --detail                # 全站列表+详情")
             print("  python crawler.py --detail                      # 独立补爬详情(从DB取未解析的)")
             print("  python crawler.py -t <标签> -p <页数>            # 按标签爬列表")
             print("  python crawler.py -t <标签> -p <页数> --detail   # 爬列表+详情")
