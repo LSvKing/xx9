@@ -16,14 +16,20 @@ import tempfile
 import subprocess
 from datetime import datetime
 
+import requests
+import urllib3
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 import crawler as c
 
+urllib3.disable_warnings()
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0 Safari/537.36"
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+IMG_CACHE = os.path.join(tempfile.gettempdir(), "xx9_img")
+os.makedirs(IMG_CACHE, exist_ok=True)
 PASSWORD = c._cfg.get("web_password", "xx9")
 SECRET = c._cfg.get("web_secret", "change-this-secret")
 
@@ -64,6 +70,23 @@ def m3u8_url(addr):
 
 def now():
     return datetime.now().isoformat()
+
+
+# 图片是否加密（newH5ImageSecret，缓存 10 分钟；取不到默认按加密处理）
+_imgsec = {"t": 0.0, "v": "1"}
+
+
+def img_secret():
+    if time.time() - _imgsec["t"] > 600:
+        try:
+            r = c.api_call("config/query", method=1,
+                           params={"groupKey": "APP", "key": "newH5ImageSecret"})
+            d = r.get("data") or r.get("result") or {}
+            _imgsec["v"] = str(d.get("newH5ImageSecret", "1"))
+        except Exception:
+            pass
+        _imgsec["t"] = time.time()
+    return _imgsec["v"]
 
 
 def require_auth(request: Request):
@@ -132,11 +155,39 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, sort: str = "new",
     rows = db.query(sql, (*params, page_size, (page - 1) * page_size))
     items = [{
         "id": r["id"], "title": r["title"],
-        "cover": pic_url(r["vodPic"]),
+        "cover": f"/api/img/{r['id']}",
         "duration": r["duration"], "author": r["author"],
         "readNumber": r["readNumber"], "likeNumber": r["likeNumber"],
     } for r in rows]
     return {"page": page, "page_size": page_size, "items": items, "has_more": len(rows) == page_size}
+
+
+@app.get("/api/img/{vid}")
+def cover(vid: int, _=Depends(require_auth)):
+    """后端拉封面图、XOR 解密（newH5ImageSecret==1）、缓存、返回 PNG。"""
+    cache = os.path.join(IMG_CACHE, f"{vid}.bin")
+    if os.path.exists(cache):
+        return FileResponse(cache, media_type="image/png")
+    rows = db.query("SELECT vodPic FROM videos WHERE id=%s", (vid,))
+    if not rows or not rows[0]["vodPic"]:
+        raise HTTPException(404)
+    url = pic_url(rows[0]["vodPic"])
+    try:
+        r = requests.get(url, timeout=12, verify=False,
+                         headers={"user-agent": UA, "referer": c.FRONTEND + "/"})
+        raw = r.content
+    except Exception:
+        raise HTTPException(502, "图片获取失败")
+    if not raw:
+        raise HTTPException(404)
+    if img_secret() == "1" and len(raw) > 1:
+        key = raw[0]
+        data = raw[1:].translate(bytes(i ^ key for i in range(256)))   # 每字节 XOR key，丢首字节
+    else:
+        data = raw
+    with open(cache, "wb") as f:
+        f.write(data)
+    return Response(data, media_type="image/png")
 
 
 @app.get("/api/video/{vid}")
@@ -151,7 +202,7 @@ def video_detail(vid: int, _=Depends(require_auth)):
     return {
         "id": v["id"], "title": v["title"],
         "tags": json.loads(v.get("tags") or "[]"),
-        "cover": pic_url(v.get("vodPic")),
+        "cover": f"/api/img/{v['id']}",
         "duration": v["duration"], "author": v["author"],
         "readNumber": v["readNumber"], "likeNumber": v["likeNumber"],
         "createTime": v["createTime"],
