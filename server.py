@@ -175,8 +175,19 @@ def video_detail(vid: int, _=Depends(require_auth)):
     if not rows:
         raise HTTPException(404, "不存在")
     v = rows[0]
-    play = json.loads(v.get("playUrls") or "[]")
-    sources = [m3u8_url(p.get("addr")) for p in play if p.get("addr")]
+    # 播放地址带时间签名会过期，必须实时从 API 取新鲜的（库里存的早过期 → 403）
+    sources = []
+    try:
+        d = c.api_call(f"cms/vod/detail/{vid}", method=1)
+        play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
+        if isinstance(play, str):
+            play = [{"addr": play}]
+        sources = [m3u8_url(p.get("addr")) for p in play if p.get("addr")]
+    except Exception:
+        pass
+    if not sources:                       # 实时失败则回退库里（可能已过期）
+        play = json.loads(v.get("playUrls") or "[]")
+        sources = [m3u8_url(p.get("addr")) for p in play if p.get("addr")]
     fav = bool(db.query("SELECT 1 FROM favorites WHERE video_id=%s", (vid,)))
     return {
         "id": v["id"], "title": v["title"],

@@ -137,13 +137,12 @@ async function openPlayer(id) {
 function playSource(src) {
   if (!src) return;
   if (hls) { hls.destroy(); hls = null; }
-  if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = src;                       // Safari 原生
-  } else if (window.Hls && Hls.isSupported()) {
+  if (window.Hls && Hls.isSupported()) {       // 优先 hls.js（Chrome/安卓）
     hls = new Hls({ maxBufferLength: 30 });
+    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) console.error('HLS', d.type, d.details); });
     hls.loadSource(src);
     hls.attachMedia(video);
-  } else {
+  } else {                                       // Safari/iOS 原生 HLS
     video.src = src;
   }
   video.play().catch(() => {});
