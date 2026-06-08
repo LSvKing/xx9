@@ -43,7 +43,9 @@ def _load_config():
         },
         "api_base": "https://api.1d1bzspqmi46l.xyz",
         "frontend": "https://rw345o29u6ivj.xyz",
-        "media_base": "https://rr.rxjhwl.com",
+        "media_base": "https://rr.rxjhwl.com",        # m3u8 播放线路前缀
+        "pic_base": "https://qv1tx.cloudworki.com",   # 图片前缀
+        "mp4_base": "https://mp4.almusiclub.com",      # mp4 前缀
         "access_token": "",
         "jwt_token": "",
         "keys": [
@@ -74,7 +76,8 @@ def _load_creds_from_db(mysql_cfg: dict):
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT api_base, frontend, media_base, access_token, jwt_token, captured_at "
+                    "SELECT api_base, frontend, media_base, pic_base, mp4_base, "
+                    "access_token, jwt_token, captured_at "
                     "FROM credentials ORDER BY id DESC LIMIT 1"
                 )
                 return cur.fetchone()
@@ -95,6 +98,8 @@ if _creds and _creds.get("api_base"):
     API_BASE = _creds["api_base"] or _cfg["api_base"]
     FRONTEND = _creds["frontend"] or _cfg["frontend"]
     MEDIA_BASE = _creds.get("media_base") or _cfg["media_base"]
+    PIC_BASE = _creds.get("pic_base") or _cfg["pic_base"]
+    MP4_BASE = _creds.get("mp4_base") or _cfg["mp4_base"]
     ACCESS_TOKEN = _creds["access_token"] or _cfg["access_token"]
     JWT_TOKEN = _creds["jwt_token"] or _cfg["jwt_token"]
     CREDS_SOURCE = "MySQL credentials 表 @ " + str(_creds.get("captured_at", ""))[:19]
@@ -102,6 +107,8 @@ else:
     API_BASE = _cfg["api_base"]
     FRONTEND = _cfg["frontend"]
     MEDIA_BASE = _cfg["media_base"]
+    PIC_BASE = _cfg["pic_base"]
+    MP4_BASE = _cfg["mp4_base"]
     ACCESS_TOKEN = _cfg["access_token"]
     JWT_TOKEN = _cfg["jwt_token"]
     CREDS_SOURCE = "config.json（DB 无凭证，已回退）"
@@ -138,18 +145,29 @@ def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
     return json.loads(aes_dec(rk, data["data"]))
 
 
-def full_url(path: str) -> str:
-    """相对路径拼域名，导出时使用"""
+def _join(base: str, path: str) -> str:
     if not path or path.startswith("http"):
         return path or ""
-    return FRONTEND + (path if path.startswith("/") else "/" + path)
+    return base + (path if path.startswith("/") else "/" + path)
+
+
+def image_url(path: str) -> str:
+    """图片(封面/动图/预览/头像) 拼图片 CDN 前缀"""
+    return _join(PIC_BASE, path)
+
+
+# 兼容旧名：图片前缀（原 full_url 误用 FRONTEND，已修正为 PIC_BASE）
+full_url = image_url
 
 
 def video_url(path: str) -> str:
-    """视频 m3u8 拼 CDN 域名"""
-    if not path or path.startswith("http"):
-        return path or ""
-    return MEDIA_BASE + (path if path.startswith("/") else "/" + path)
+    """视频 m3u8 拼播放线路前缀"""
+    return _join(MEDIA_BASE, path)
+
+
+def mp4_url(path: str) -> str:
+    """mp4 拼 mp4 CDN 前缀"""
+    return _join(MP4_BASE, path)
 
 
 SCHEMA = [

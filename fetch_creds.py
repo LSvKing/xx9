@@ -19,12 +19,20 @@ import asyncio
 import json
 import os
 import re
+import time
+import base64
 import argparse
 from datetime import datetime
 from urllib.parse import urlparse
 
+import requests
+import urllib3
 import pymysql
 import pymysql.cursors
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+
+urllib3.disable_warnings()
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 DEFAULT_URL = "https://xx9.com/enter"   # 永久发布页，最稳
@@ -70,6 +78,8 @@ def ensure_table(cfg: dict):
             api_base     VARCHAR(255),
             frontend     VARCHAR(255),
             media_base   VARCHAR(255),
+            pic_base     VARCHAR(255),
+            mp4_base     VARCHAR(255),
             access_token VARCHAR(255),
             jwt_token    TEXT,
             source_url   VARCHAR(255),
@@ -77,15 +87,21 @@ def ensure_table(cfg: dict):
             INDEX idx_cred_captured (captured_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """)
+    # 已有旧表则补列（列已存在会报错，忽略）
+    for col in ("pic_base", "mp4_base"):
+        try:
+            conn.cursor().execute(f"ALTER TABLE credentials ADD COLUMN {col} VARCHAR(255)")
+        except Exception:
+            pass
     return conn
 
 
 def insert_creds(conn, row: dict):
     conn.cursor().execute("""
-        INSERT INTO credentials (api_base, frontend, media_base, access_token,
-            jwt_token, source_url, captured_at)
-        VALUES (%(api_base)s, %(frontend)s, %(media_base)s, %(access_token)s,
-            %(jwt_token)s, %(source_url)s, %(captured_at)s)
+        INSERT INTO credentials (api_base, frontend, media_base, pic_base, mp4_base,
+            access_token, jwt_token, source_url, captured_at)
+        VALUES (%(api_base)s, %(frontend)s, %(media_base)s, %(pic_base)s, %(mp4_base)s,
+            %(access_token)s, %(jwt_token)s, %(source_url)s, %(captured_at)s)
     """, row)
 
 
@@ -93,6 +109,48 @@ def latest_creds(conn) -> dict:
     cur = conn.cursor()
     cur.execute("SELECT * FROM credentials ORDER BY id DESC LIMIT 1")
     return cur.fetchone()
+
+
+# ============================================================
+# 用刚抓到的凭证调 config/query 拿 CDN 前缀
+# ============================================================
+def fetch_cdn_prefixes(api_base, access_token, jwt_token, origin, keys) -> dict:
+    """调 config/query 取图片/视频/mp4 前缀。失败返回空 dict。"""
+    def enc(k, s):
+        return base64.b64encode(AES.new(k.encode(), AES.MODE_ECB).encrypt(pad(s.encode(), 16))).decode()
+
+    def dec(k, b):
+        return unpad(AES.new(k.encode(), AES.MODE_ECB).decrypt(base64.b64decode(b)), 16)
+
+    try:
+        ts = int(time.time() * 1000)
+        body = json.dumps({"method": 1, "uri": "config/query",
+                           "params": {"groupKey": "APP",
+                                      "key": "picBaseUrl,newPicBaseUrl,playLines,h5_play_line,mp4Domain"}},
+                          separators=(",", ":"))
+        r = requests.post(f"{api_base}/fast-endecode/main/request",
+                          json={"data": enc(keys[ts % 10], body), "time": ts}, timeout=15, verify=False,
+                          headers={"accesstoken": access_token, "jwttoken": jwt_token, "origin": origin,
+                                   "content-type": "application/json", "user-agent": UA})
+        d = r.json()
+        conf = json.loads(dec(keys[d["time"] % 10], d["data"]))
+        conf = conf.get("data") or conf.get("result") or conf
+        media = None
+        for kk in ("h5_play_line", "playLines", "pc_play_line"):   # m3u8 播放线路，取第一条
+            try:
+                lines = json.loads(conf.get(kk) or "[]")
+                if lines:
+                    media = lines[0].get("line"); break
+            except Exception:
+                pass
+        return {
+            "pic_base": conf.get("picBaseUrl") or conf.get("newPicBaseUrl"),
+            "mp4_base": conf.get("mp4Domain"),
+            "media_base": media,
+        }
+    except Exception as e:
+        print(f"  [config/query 拉 CDN 前缀失败: {str(e)[:60]}]")
+        return {}
 
 
 # ============================================================
@@ -157,7 +215,7 @@ def main():
             print("credentials 表为空")
         else:
             print("最新凭证:")
-            for k in ["captured_at", "api_base", "frontend", "media_base", "access_token", "jwt_token", "source_url"]:
+            for k in ["captured_at", "api_base", "frontend", "media_base", "pic_base", "mp4_base", "access_token", "jwt_token", "source_url"]:
                 v = row.get(k)
                 print(f"  {k:<13}: {v}")
         return
@@ -177,10 +235,16 @@ def main():
         p = urlparse(cap["final_url"])
         frontend = f"{p.scheme}://{p.netloc}"
 
+    # 用刚抓到的凭证拉 CDN 前缀（图片/视频/mp4），拉不到则沿用 config
+    cdn = fetch_cdn_prefixes(cap["api_base"], cap["access_token"], cap["jwt_token"],
+                             frontend or cap["api_base"], cfg.get("keys", []))
+
     row = {
         "api_base": cap["api_base"],
         "frontend": frontend or None,
-        "media_base": cfg.get("media_base"),   # media 域名不在请求里，沿用 config
+        "media_base": cdn.get("media_base") or cfg.get("media_base"),
+        "pic_base": cdn.get("pic_base") or cfg.get("pic_base"),
+        "mp4_base": cdn.get("mp4_base") or cfg.get("mp4_base"),
         "access_token": cap["access_token"],
         "jwt_token": cap["jwt_token"],
         "source_url": args.url,
@@ -194,6 +258,9 @@ def main():
     print("\n已写入 MySQL credentials 表:")
     print(f"  api_base    : {row['api_base']}")
     print(f"  frontend    : {row['frontend']}")
+    print(f"  media_base  : {row['media_base']}   (m3u8)")
+    print(f"  pic_base    : {row['pic_base']}   (图片)")
+    print(f"  mp4_base    : {row['mp4_base']}   (mp4)")
     print(f"  access_token: {row['access_token']}")
     print(f"  jwt_token   : {row['jwt_token'][:50]}...")
 
@@ -201,6 +268,9 @@ def main():
         cfg["api_base"] = row["api_base"]
         if row["frontend"]:
             cfg["frontend"] = row["frontend"]
+        for k in ("media_base", "pic_base", "mp4_base"):
+            if row[k]:
+                cfg[k] = row[k]
         cfg["access_token"] = row["access_token"]
         cfg["jwt_token"] = row["jwt_token"]
         with open(CONFIG_PATH, "w") as f:
