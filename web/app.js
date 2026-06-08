@@ -246,7 +246,6 @@ function _closePlayer() {
   video.removeAttribute('src'); video.load();
 }
 $('#close-player').onclick = closePlayer;
-$('#player').addEventListener('click', e => { if (e.target.id === 'player') closePlayer(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlayer(); });
 
 // ---------- 客户端直连下载（拉分片 + AES-128 解密 + 拼 .ts）----------

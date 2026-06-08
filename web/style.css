@@ -63,10 +63,13 @@ header nav a.active { background: var(--acc); color: #fff; }
 .login-box button { width: 100%; padding: 11px; background: var(--acc); color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; }
 .err { color: #ff6b6b; font-size: 12px; margin-top: 10px; min-height: 16px; }
 
-/* 播放器 */
-.player-box { width: min(960px, 96vw); background: var(--card); border-radius: 12px; overflow: hidden; position: relative; }
+/* 播放子页面（fixed 全屏盖住列表 → 返回时列表滚动位置天然保留）*/
+.page { position: fixed; inset: 0; z-index: 50; background: var(--bg); overflow-y: auto; }
+.pbar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; padding: 10px 16px;
+  background: rgba(13,16,26,.95); backdrop-filter: blur(8px); border-bottom: 1px solid #232838; }
+.back-btn { background: var(--card); color: var(--fg); border: 1px solid #2b3146; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+.player-box { width: 100%; max-width: 960px; margin: 0 auto; }
 .player-box video { width: 100%; max-height: 70vh; background: #000; display: block; }
-.close { position: absolute; right: 10px; top: 8px; z-index: 2; background: rgba(0,0,0,.6); color: #fff; border: none; width: 34px; height: 34px; border-radius: 50%; font-size: 22px; cursor: pointer; }
 .meta { padding: 14px 18px 18px; }
 .meta h3 { font-size: 16px; margin-bottom: 10px; }
 .actions { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
