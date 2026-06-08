@@ -252,31 +252,52 @@ def groups(_=Depends(require_auth)):
 
 
 # ============================================================
-# 首页分组聚合（纯本地：按库内分类聚合，不碰原站，缓存 5 分钟）
+# 首页专题墙（视频全本地；专题名字典走 theme/list，与 /api/groups 同模式）
 # ============================================================
 _home = {"t": 0.0, "data": []}
+# 专题字典 id->title：仅 20 条轻量元数据，缓存 24h；视频数据仍全部本地。
+# 原站下架/隐藏的专题取不到名 → 首页自动跳过该块。
+_theme_names = {"t": 0.0, "data": {}}
+
+
+def theme_names() -> dict:
+    if time.time() - _theme_names["t"] > 86400 or not _theme_names["data"]:
+        try:
+            r = c.api_call("theme/list", method=1)
+            lst = (r.get("data") or {}).get("list") or []
+            d = {t["id"]: t.get("title") for t in lst if t.get("id")}
+            if d:
+                _theme_names["data"] = d
+                _theme_names["t"] = time.time()
+        except Exception:
+            pass
+    return _theme_names["data"]
 
 
 @app.get("/api/home")
 def home(_=Depends(require_auth)):
-    """首页主题墙：数据全部取自本地 videos 表，按分类(groupNames)分组，
-    每组放最新若干条。只收录有播放地址(detail_at 非空)的视频 → 点开必能播。"""
+    """首页专题墙：视频全部取自本地 videos 表，按 themes(专题id) 分组；
+    专题名来自 theme/list 字典(24h缓存)。下架专题取不到名 → 跳过该块。"""
     if time.time() - _home["t"] > 300 or not _home["data"]:
         try:
+            names = theme_names()
             rows = db.query(
                 "SELECT id, title, vodPic, duration, author, readNumber, likeNumber, "
-                "createTime, groupNames FROM videos "
+                "createTime, themes FROM videos "
                 "ORDER BY createTime DESC LIMIT 3000")
-            buckets = {}   # 分类id -> {id,title,items}；按 createTime 倒序填，每类留最新 12 条
+            buckets = {}   # 专题id -> {id,title,items}；按 createTime 倒序填，每题留最新 12 条
             for r in rows:
                 try:
-                    gs = json.loads(r.get("groupNames") or "[]")
+                    ts = json.loads(r.get("themes") or "[]")
                 except Exception:
-                    gs = []
-                for g in gs:
-                    if not isinstance(g, dict) or not g.get("id"):
+                    ts = []
+                if not isinstance(ts, list):
+                    ts = []
+                for tid in ts:
+                    name = names.get(tid)
+                    if not name:               # 下架/隐藏专题，无名 → 跳过
                         continue
-                    b = buckets.setdefault(g["id"], {"id": g["id"], "title": g.get("name") or "", "items": []})
+                    b = buckets.setdefault(tid, {"id": tid, "title": name, "items": []})
                     if len(b["items"]) < 12:
                         b["items"].append({
                             "id": r["id"], "title": r["title"],
@@ -284,7 +305,7 @@ def home(_=Depends(require_auth)):
                             "duration": r["duration"], "author": r["author"],
                             "readNumber": r["readNumber"], "createTime": r["createTime"],
                         })
-            # 视频太少的分类不单独成块（避免单薄）；视频多的分类排前面
+            # 视频太少的专题不单独成块；视频多的专题排前面
             out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
                          key=lambda b: len(b["items"]), reverse=True)
             if out:
