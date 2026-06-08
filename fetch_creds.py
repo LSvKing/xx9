@@ -135,18 +135,21 @@ def fetch_cdn_prefixes(api_base, access_token, jwt_token, origin, keys) -> dict:
         d = r.json()
         conf = json.loads(dec(keys[d["time"] % 10], d["data"]))
         conf = conf.get("data") or conf.get("result") or conf
-        media = None
-        for kk in ("h5_play_line", "playLines", "pc_play_line"):   # m3u8 播放线路，取第一条
-            try:
-                lines = json.loads(conf.get(kk) or "[]")
-                if lines:
-                    media = lines[0].get("line"); break
-            except Exception:
-                pass
+        def first_line(*keys):
+            for kk in keys:
+                try:
+                    arr = json.loads(conf.get(kk) or "[]")
+                    if arr:
+                        return arr[0].get("line")
+                except Exception:
+                    pass
+            return None
         return {
-            "pic_base": conf.get("picBaseUrl") or conf.get("newPicBaseUrl"),
+            # 图片用 playLines[0]（快线，原站图片函数取这条），回退 picBaseUrl
+            "pic_base": first_line("playLines") or conf.get("picBaseUrl") or conf.get("newPicBaseUrl"),
+            # 视频 m3u8 用 h5_play_line[0]（国线）
+            "media_base": first_line("h5_play_line", "pc_play_line", "playLines"),
             "mp4_base": conf.get("mp4Domain"),
-            "media_base": media,
         }
     except Exception as e:
         print(f"  [config/query 拉 CDN 前缀失败: {str(e)[:60]}]")
