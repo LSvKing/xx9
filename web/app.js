@@ -126,7 +126,8 @@ async function openPlayer(id) {
     favBtn.classList.toggle('on', r.fav);
     favBtn.textContent = r.fav ? '★ 已收藏' : '☆ 收藏';
   };
-  $('#dl-btn').href = '/api/download/' + id;
+  const fname = (v.title || id).replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  $('#dl-btn').onclick = (e) => { e.preventDefault(); downloadHls(lines[+sel.value].url, fname, $('#dl-btn')); };
 
   // 线路选择
   const sel = $('#line-sel');
@@ -167,6 +168,53 @@ function closePlayer() {
 $('#close-player').onclick = closePlayer;
 $('#player').addEventListener('click', e => { if (e.target.id === 'player') closePlayer(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlayer(); });
+
+// ---------- 客户端直连下载（拉分片 + AES-128 解密 + 拼 .ts）----------
+function hexToBytes(h) { const a = new Uint8Array(h.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16); return a; }
+
+async function downloadHls(m3u8Url, fname, btn) {
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  const orig = '⬇ 下载';
+  try {
+    btn.textContent = '解析…';
+    const txt = await (await fetch(m3u8Url)).text();
+    const base = m3u8Url.replace(/[^/]*$/, '');
+    let key = null, iv = new Uint8Array(16), hasIv = false;
+    const segs = [];
+    for (const raw of txt.split('\n')) {
+      const l = raw.trim();
+      if (l.startsWith('#EXT-X-KEY')) {
+        const u = l.match(/URI="([^"]+)"/), ivm = l.match(/IV=0x([0-9a-fA-F]+)/);
+        if (u) { const kb = await (await fetch(u[1])).arrayBuffer(); key = await crypto.subtle.importKey('raw', kb, 'AES-CBC', false, ['decrypt']); }
+        if (ivm) { iv = hexToBytes(ivm[1]); hasIv = true; }
+      } else if (l && !l.startsWith('#')) {
+        segs.push(l.startsWith('http') ? l : base + l);
+      }
+    }
+    if (!segs.length) throw new Error('no segments');
+    const parts = [];
+    for (let i = 0; i < segs.length; i++) {
+      let buf = await (await fetch(segs[i])).arrayBuffer();
+      if (key) {
+        let useIv = iv;
+        if (!hasIv) { useIv = new Uint8Array(16); new DataView(useIv.buffer).setUint32(12, i); }  // 无显式IV则用分片序号
+        buf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: useIv }, key, buf);
+      }
+      parts.push(new Uint8Array(buf));
+      btn.textContent = `下载 ${Math.round((i + 1) / segs.length * 100)}%`;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(parts, { type: 'video/mp2t' }));
+    a.download = fname + '.ts';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 15000);
+    btn.textContent = '✓ 已下载';
+  } catch (e) {
+    btn.textContent = '下载失败';
+  }
+  setTimeout(() => { btn.textContent = orig; delete btn.dataset.busy; }, 2500);
+}
 
 // ---------- 初始化 ----------
 async function init() {

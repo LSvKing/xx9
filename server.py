@@ -9,15 +9,11 @@
     uv run uvicorn server:app --host 0.0.0.0 --port 8000
 """
 import os
-import re
 import json
 import time
-import tempfile
-import subprocess
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -256,29 +252,7 @@ def groups(_=Depends(require_auth)):
     return _groups["data"]
 
 
-# ============================================================
-# 下载：ffmpeg 把 m3u8 转 mp4 再发（-c copy，不重编码，较快）
-# ============================================================
-@app.get("/api/download/{vid}")
-def download(vid: int, _=Depends(require_auth)):
-    rows = db.query("SELECT title, playUrls FROM videos WHERE id=%s", (vid,))
-    if not rows:
-        raise HTTPException(404, "不存在")
-    play = json.loads(rows[0].get("playUrls") or "[]")
-    if not play:
-        raise HTTPException(404, "无播放地址")
-    url = m3u8_url(play[0]["addr"])
-    title = re.sub(r'[\\/*?:"<>|]', "_", rows[0]["title"] or str(vid))[:40]
-    out = os.path.join(tempfile.gettempdir(), f"xx9_{vid}.mp4")
-    if not os.path.exists(out):
-        try:
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                            "-headers", f"Referer: {c.FRONTEND}/",
-                            "-i", url, "-c", "copy", "-bsf:a", "aac_adtstoasc", out],
-                           check=True, timeout=600)
-        except Exception as e:
-            raise HTTPException(500, f"转码失败: {str(e)[:80]}")
-    return FileResponse(out, filename=f"{title}.mp4", media_type="video/mp4")
+# 下载改由浏览器直连 CDN 完成（拉分片 + AES 解密 + 拼 .ts），不经后端，见 web/app.js
 
 
 # ---- 静态前端（必须最后挂，让 /api 路由优先）----
