@@ -600,12 +600,22 @@ def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 2
     print(f"详情完成! 成功{ok} 空洞{gap} 失败{err}, 共 {db.count_details()} 条")
 
 
-def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000):
-    """全量回填：从当前最大 id 往下枚举到 1，逐个取详情，同时写 items+details。
-    - 排重：每块先剔除已抓过(已有 details)的 id，不重复请求
-    - 断点续传：progress(__backfill__).page = 已回填到的最低 id
+def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000,
+                   shard=None):
+    """全量回填：从当前最大 id 往下枚举到 1，逐个取详情，写入 videos。
+    - 排重：每块先剔除已抓过(detail_at 非空)的 id，不重复请求
+    - 断点续传：progress.page = 已回填到的最低 id
+    - 分片(shard=(k,N))：只抓 id%N==k 的，多机各跑一个通道并行，互不重复。
+      每个通道独立进度行 __backfill_k/N__，独立续传。
     """
-    tag = "__backfill__"
+    if shard is None:
+        tag, lbl = "__backfill__", "回填"
+        def mine(i): return True
+    else:
+        k, n = shard
+        tag, lbl = f"__backfill_{k}/{n}__", f"回填{k}/{n}"
+        def mine(i): return i % n == k
+
     prog = db.get_progress(tag)
     if prog["page"]:
         next_id = prog["page"] - 1
@@ -614,28 +624,30 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
         top = get_max_id()
         next_id = top
     if next_id < 1:
-        print("[回填] 已完成（已到 id=1）")
+        print(f"[{lbl}] 已完成（已到 id=1）")
         return
-    print(f"[回填] 起始 maxId={top} | 从 id={next_id} 往下到 1 | 并发{workers} 批量{batch} 块{chunk}")
+    print(f"[{lbl}] 起始 maxId={top} | 从 id={next_id} 往下到 1 | 并发{workers} 批量{batch} 块{chunk}"
+          + (f" | 分片 id%{shard[1]}=={shard[0]}" if shard else ""))
 
     g_ok = g_gap = g_err = g_skip = 0
     cur = next_id
     while cur >= 1:
         lo = max(1, cur - chunk + 1)
-        # 排重：剔除该区间内已有详情的 id
+        cand = [i for i in range(cur, lo - 1, -1) if mine(i)]   # 本通道在该块的候选
+        # 排重：剔除已抓过详情的 id
         have = {r["id"] for r in db.query(
             "SELECT id FROM videos WHERE detail_at IS NOT NULL AND id BETWEEN %s AND %s", (lo, cur))}
-        ids = [i for i in range(cur, lo - 1, -1) if i not in have]
-        g_skip += (cur - lo + 1) - len(ids)
+        ids = [i for i in cand if i not in have]
+        g_skip += len(cand) - len(ids)
         if ids:
             ok, gap, err = _run_detail_jobs(db, ids, workers, batch, write_items=True,
-                                            label=f"回填{lo}-{cur}")
+                                            label=f"{lbl} {lo}-{cur}")
             g_ok += ok; g_gap += gap; g_err += err
         db.set_progress(tag, lo, top, db.count_items())   # page=lo: 已回填到 lo
-        print(f"[回填] {lo}-{cur} 完成 | 累计 ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err} "
-              f"| items={db.count_items()}")
+        print(f"[{lbl}] {lo}-{cur} 完成 | 累计 ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err} "
+              f"| videos={db.count_items()}")
         cur = lo - 1
-    print(f"[回填] 全部完成! ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err}")
+    print(f"[{lbl}] 全部完成! ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err}")
 
 
 def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
@@ -877,6 +889,7 @@ def main():
     parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
+    parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
     parser.add_argument("--update", action="store_true", help="更新 token/域名 到 config.json")
     parser.add_argument("--from-curl", type=str, help="从浏览器 curl 命令提取 token 并更新 config")
     args = parser.parse_args()
@@ -906,7 +919,14 @@ def main():
             if not args.no_check and not preflight(args.workers):
                 return
             if args.backfill:
-                crawl_backfill(db, args.workers, args.batch)
+                shard = None
+                if args.shard:
+                    k, n = (int(x) for x in args.shard.split("/"))
+                    if not (0 <= k < n):
+                        print(f"--shard 非法: k 必须在 0~{n-1}")
+                        return
+                    shard = (k, n)
+                crawl_backfill(db, args.workers, args.batch, shard=shard)
             elif args.refresh:
                 crawl_refresh(db, args.workers, args.batch)
             else:
