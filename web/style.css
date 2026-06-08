@@ -53,7 +53,7 @@ header nav a.active { background: var(--acc); color: #fff; }
 .meta { padding: 14px 18px 18px; }
 .meta h3 { font-size: 16px; margin-bottom: 10px; }
 .actions { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
-.actions button, .actions a { background: var(--bg); color: var(--fg); border: 1px solid #2b3146; border-radius: 8px; padding: 7px 12px; cursor: pointer; text-decoration: none; font-size: 13px; }
+.actions button, .actions a, .actions select { background: var(--bg); color: var(--fg); border: 1px solid #2b3146; border-radius: 8px; padding: 7px 12px; cursor: pointer; text-decoration: none; font-size: 13px; }
 .actions button.on { background: var(--acc); color: #fff; border-color: var(--acc); }
 .stats { color: var(--mut); font-size: 12px; margin-left: auto; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }

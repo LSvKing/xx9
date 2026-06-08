@@ -128,8 +128,18 @@ async function openPlayer(id) {
   };
   $('#dl-btn').href = '/api/download/' + id;
 
-  const src = (v.sources || [])[0];
-  playSource(src);
+  // 线路选择
+  const sel = $('#line-sel');
+  const lines = v.lines && v.lines.length ? v.lines : (v.sources || []).map((u, i) => ({ name: '线路' + (i + 1), url: u }));
+  sel.innerHTML = lines.map((l, i) => `<option value="${i}">${esc(l.name)}</option>`).join('');
+  sel.style.display = lines.length > 1 ? '' : 'none';
+  sel.onchange = () => {
+    const t = video.currentTime;
+    playSource(lines[+sel.value].url);
+    video.addEventListener('loadedmetadata', () => { try { video.currentTime = t; } catch (e) {} }, { once: true });
+  };
+
+  playSource(lines.length ? lines[0].url : null);
   api('/api/history/' + id, { method: 'POST' });   // 记历史
   $('#player').classList.remove('hidden');
 }

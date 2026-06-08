@@ -41,8 +41,8 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET, max_age=30 * 24 * 3600)
 
 
 # ---- CDN 前缀（每 2 分钟实时从 config/query 拉，跟随域名轮换）----
-# 图片用 playLines[0]（快线，原站图片函数就取这条），视频 m3u8 用 h5_play_line[0]（国线）。
-_pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE}
+# 图片用 playLines[0]（快线，原站图片函数就取这条），视频 m3u8 用 h5_play_line（国线/海线，可切换）。
+_pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE, "lines": []}
 
 
 def _first_line(s):
@@ -60,7 +60,16 @@ def prefixes():
                            params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
             conf = r.get("data") or r.get("result") or {}
             _pref["pic"] = _first_line(conf.get("playLines")) or conf.get("picBaseUrl") or _pref["pic"]
-            _pref["media"] = _first_line(conf.get("h5_play_line")) or _pref["media"]
+            # 视频线路（国线/海线，h5_play_line），按 line 去重
+            hl = json.loads(conf.get("h5_play_line") or "[]")
+            seen, lines = set(), []
+            for x in hl:
+                ln = x.get("line")
+                if ln and ln not in seen:
+                    seen.add(ln); lines.append({"name": x.get("name") or ln, "line": ln})
+            if lines:
+                _pref["lines"] = lines
+                _pref["media"] = lines[0]["line"]
         except Exception:
             pass
         _pref["t"] = time.time()
@@ -176,18 +185,25 @@ def video_detail(vid: int, _=Depends(require_auth)):
         raise HTTPException(404, "不存在")
     v = rows[0]
     # 播放地址带时间签名会过期，必须实时从 API 取新鲜的（库里存的早过期 → 403）
-    sources = []
+    addr = None
     try:
         d = c.api_call(f"cms/vod/detail/{vid}", method=1)
         play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
         if isinstance(play, str):
             play = [{"addr": play}]
-        sources = [m3u8_url(p.get("addr")) for p in play if p.get("addr")]
+        addr = next((p.get("addr") for p in play if p.get("addr")), None)
     except Exception:
         pass
-    if not sources:                       # 实时失败则回退库里（可能已过期）
+    if not addr:                          # 实时失败则回退库里（可能已过期）
         play = json.loads(v.get("playUrls") or "[]")
-        sources = [m3u8_url(p.get("addr")) for p in play if p.get("addr")]
+        addr = play[0].get("addr") if play else None
+
+    # 同一签名地址套到各条线路（国线/海线），前端可切换
+    pr = prefixes()
+    lines = [{"name": ln["name"], "url": c._join(ln["line"], addr)} for ln in pr.get("lines", [])] if addr else []
+    if not lines and addr:
+        lines = [{"name": "默认", "url": m3u8_url(addr)}]
+
     fav = bool(db.query("SELECT 1 FROM favorites WHERE video_id=%s", (vid,)))
     return {
         "id": v["id"], "title": v["title"],
@@ -196,7 +212,9 @@ def video_detail(vid: int, _=Depends(require_auth)):
         "duration": v["duration"], "author": v["author"],
         "readNumber": v["readNumber"], "likeNumber": v["likeNumber"],
         "createTime": v["createTime"],
-        "sources": sources, "fav": fav,
+        "lines": lines,
+        "sources": [lines[0]["url"]] if lines else [],   # 兼容旧前端
+        "fav": fav,
     }
 
 
