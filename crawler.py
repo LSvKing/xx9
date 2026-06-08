@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-主播视频爬虫 - SQLite 版本
+主播视频爬虫 - MySQL 版本
 
 安装:
 	uv sync
 
 运行:
-	uv run python crawler.py --all                    # 全站抓取列表
-	uv run python crawler.py --all --detail           # 全站抓取列表+详情
-	uv run python crawler.py --detail                 # 独立补爬详情（从DB取未解析的）
-	uv run python crawler.py -t 动漫 -p 10            # 按标签爬列表
-	uv run python crawler.py -t 动漫 -p 10 --detail   # 按标签爬列表+详情
+	uv run python crawler.py --backfill               # 全量回填（枚举 id 抓全站历史）
+	uv run python crawler.py --backfill --shard 3/10  # 分片回填（多机并行）
+	uv run python crawler.py --refresh                # 增量（只抓比库里更新的）
+	uv run python crawler.py --detail                 # 独立补爬详情（从DB取未抓详情的）
 	uv run python crawler.py --download               # 下载所有未下载视频
 	uv run python crawler.py --download -w 3          # 下载（3并发）
 	uv run python crawler.py -d 1664643               # 单个详情
@@ -433,38 +432,6 @@ def crawl_list(db: DB, tag: str, max_pages: int):
     print(f"[{tag}] 完成! 共 {db.count_items()} 条")
 
 
-def crawl_all(db: DB):
-    """全站抓取 - 无关键词搜索，跑到无数据为止"""
-    tag = "__all__"
-    prog = db.get_progress(tag)
-    page = prog["page"] + 1
-    while True:
-        try:
-            result = api_call("cms/vod/search", method=2, params={
-                "wd": "", "page": page, "pageSize": PAGE_SIZE,
-            })
-        except Exception as e:
-            print(f"[全站] 第{page}页 请求失败: {e}")
-            time.sleep(5)
-            continue
-        if result.get("code") != "0000":
-            print(f"[全站] 第{page}页 错误: {result.get('message')}")
-            break
-        items = result.get("data", [])
-        total = result.get("total", 0)
-        if not items:
-            break
-        new_count = db.insert_items_batch(items)   # 整页一次写入，返回实际新增
-        collected = db.count_items()
-        db.set_progress(tag, page, total, collected)
-        print(f"[全站] 第{page}页 新增{new_count}条 累计{collected}/{total} 进度{collected*100//max(total,1)}%")
-        if len(items) < PAGE_SIZE:
-            break
-        page += 1
-        time.sleep(0.5)
-    print(f"[全站] 完成! 共 {db.count_items()} 条")
-
-
 def get_max_id() -> int:
     """当前站点最大视频 id（搜索第1页第1条，按时间倒序）。"""
     r = api_call("cms/vod/search", method=2, params={"wd": "", "page": 1, "pageSize": 1})
@@ -883,7 +850,6 @@ def main():
     parser.add_argument("-d", "--detail-id", help="爬取单个详情")
     parser.add_argument("--detail", action="store_true", help="爬完列表后继续爬详情")
     parser.add_argument("--download", action="store_true", help="下载未下载的视频")
-    parser.add_argument("--all", action="store_true", help="全站抓取（列表，仅最新1万条）")
     parser.add_argument("--backfill", action="store_true", help="全量回填：枚举 id 从大到小抓全站历史")
     parser.add_argument("--refresh", action="store_true", help="增量：抓比库中最大 id 更新的新视频")
     parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
@@ -915,7 +881,7 @@ def main():
             download_videos(db, args.workers)
             return
 
-        if args.backfill or args.refresh or (args.detail and not args.tag and not args.all):
+        if args.backfill or args.refresh or (args.detail and not args.tag):
             if not args.no_check and not preflight(args.workers):
                 return
             if args.backfill:
@@ -933,12 +899,6 @@ def main():
                 crawl_details(db, "__all__", args.workers, args.batch)
             return
 
-        if args.all:
-            crawl_all(db)
-            if args.detail:
-                crawl_details(db, "__all__", args.workers, args.batch)
-            return
-
         if args.tag:
             crawl_list(db, args.tag, args.pages)
             if args.detail:
@@ -950,16 +910,13 @@ def main():
             print(f"数据库: MySQL {MYSQL['host']}:{MYSQL['port']}/{MYSQL['database']}")
             print(f"域名/token 来源: {CREDS_SOURCE}")
             print(f"  api_base: {API_BASE}")
-            print(f"已收集: {db.count_items()} 列表项, {db.count_details()} 详情, {db.count_downloaded()} 已下载")
+            print(f"已收集: {db.count_items()} 条视频, {db.count_details()} 有详情, {db.count_downloaded()} 已下载")
             print()
             print("阶段1 - 爬取信息:")
             print("  python crawler.py --backfill                    # 全量回填(枚举id，抓全站114万历史)")
+            print("  python crawler.py --backfill --shard 3/10       # 分片回填(多机并行用)")
             print("  python crawler.py --refresh                     # 增量(只抓比库里更新的新视频)")
-            print("  python crawler.py --all                         # 全站列表(仅最新1万条)")
-            print("  python crawler.py --all --detail                # 全站列表+详情")
-            print("  python crawler.py --detail                      # 独立补爬详情(从DB取未解析的)")
-            print("  python crawler.py -t <标签> -p <页数>            # 按标签爬列表")
-            print("  python crawler.py -t <标签> -p <页数> --detail   # 爬列表+详情")
+            print("  python crawler.py --detail                      # 独立补爬详情(从DB取未抓详情的)")
             print()
             print("阶段2 - 下载视频:")
             print("  python crawler.py --download                     # 下载所有未下载的")
