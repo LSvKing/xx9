@@ -40,16 +40,29 @@ app = FastAPI(title="xx9")
 app.add_middleware(SessionMiddleware, secret_key=SECRET, max_age=30 * 24 * 3600)
 
 
-# ---- CDN 前缀（每 60s 从 credentials 表刷新，跟随域名轮换）----
+# ---- CDN 前缀（每 2 分钟实时从 config/query 拉，跟随域名轮换）----
+# 图片用 playLines[0]（快线，原站图片函数就取这条），视频 m3u8 用 h5_play_line[0]（国线）。
 _pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE}
 
 
+def _first_line(s):
+    try:
+        arr = json.loads(s or "[]")
+        return arr[0]["line"] if arr else None
+    except Exception:
+        return None
+
+
 def prefixes():
-    if time.time() - _pref["t"] > 60:
-        cr = c._load_creds_from_db(c.MYSQL)
-        if cr:
-            _pref["media"] = cr.get("media_base") or _pref["media"]
-            _pref["pic"] = cr.get("pic_base") or _pref["pic"]
+    if time.time() - _pref["t"] > 120:
+        try:
+            r = c.api_call("config/query", method=1,
+                           params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
+            conf = r.get("data") or r.get("result") or {}
+            _pref["pic"] = _first_line(conf.get("playLines")) or conf.get("picBaseUrl") or _pref["pic"]
+            _pref["media"] = _first_line(conf.get("h5_play_line")) or _pref["media"]
+        except Exception:
+            pass
         _pref["t"] = time.time()
     return _pref
 
