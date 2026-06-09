@@ -39,11 +39,38 @@ DEFAULT_URL = "https://xx9.com/enter"   # 永久发布页，最稳
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0 Safari/537.36"
 
 
+DEFAULT_KEYS = [
+    "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
+    "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
+    "T0RVp7KIPamrtQ33", "8HbPxhX6fjhhhwok", "ugvseZc5Kkj8ecmV",
+    "G7i3OPcfNhBnAYpc",
+]
+
+
 def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
             return json.load(f)
     return {}
+
+
+def get_keys(cfg: dict) -> list:
+    """keys 优先 config.json，其次 MySQL settings 表，最后内置默认（公开的）。"""
+    if cfg.get("keys"):
+        return cfg["keys"]
+    try:
+        conn = mysql_conn(cfg)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT v FROM settings WHERE k='keys'")
+            row = cur.fetchone()
+            if row:
+                return json.loads(row["v"])
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return DEFAULT_KEYS
 
 
 # ============================================================
@@ -191,7 +218,7 @@ async def capture(url: str, headful: bool) -> dict:
     # 给 app 时间发起 jwt-token / config 等请求
     for _ in range(12):
         await asyncio.sleep(1)
-        if captured["api_base"] and captured["access_token"] and captured["jwt_token"]:
+        if captured["api_base"] and captured["jwt_token"]:   # access_token 现已可选
             break
     captured["final_url"] = page.url
 
@@ -226,12 +253,14 @@ def main():
     print(f"打开 {args.url} 抓取域名/token ...")
     cap = asyncio.run(capture(args.url, args.headful))
 
-    if not cap["api_base"] or not cap["access_token"]:
-        print("未捕获到 API 请求/token，可能原因:")
+    if not cap["api_base"] or not cap["jwt_token"]:   # access_token 现已可选，只要这俩
+        print("未捕获到 API 域名/jwt_token，可能原因:")
         print("  1. 代理未生效（这些域名直连会被重置，需走代理）")
-        print("  2. 入口域名已失效，换一个 --url")
+        print("  2. 入口域名已失效，换一个 --url（或不带 --url 用默认 xx9.com/enter）")
         print(f"  当前捕获: {cap}")
         raise SystemExit(1)
+    if not cap["access_token"]:
+        print("  (注: access_token 没抓到，但接口只认 jwt_token，不影响)")
 
     frontend = (cap["origin"] or "").rstrip("/")
     if not frontend and cap["final_url"]:
@@ -240,7 +269,7 @@ def main():
 
     # 用刚抓到的凭证拉 CDN 前缀（图片/视频/mp4），拉不到则沿用 config
     cdn = fetch_cdn_prefixes(cap["api_base"], cap["access_token"], cap["jwt_token"],
-                             frontend or cap["api_base"], cfg.get("keys", []))
+                             frontend or cap["api_base"], get_keys(cfg))
 
     row = {
         "api_base": cap["api_base"],
