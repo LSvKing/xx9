@@ -19,6 +19,9 @@ from starlette.middleware.sessions import SessionMiddleware
 
 import crawler as c
 
+if c._PROXY:                 # 有配置代理就让服务器 API 调用走代理（绕 WAF）
+    c.USE_PROXY = True
+
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 PASSWORD = c._cfg.get("web_password", "xx9")
 SECRET = c._cfg.get("web_secret", "change-this-secret")

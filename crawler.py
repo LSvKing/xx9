@@ -216,6 +216,7 @@ class _ProxyPool:
 
 
 _PROXY = _ProxyPool(_cfg["proxy"]) if _cfg.get("proxy", {}).get("query_url") else None
+USE_PROXY = False   # 是否走代理池；crawler 由 --proxy 控制，server 启动时按需打开
 
 
 def aes_enc(key: str, plain: str) -> str:
@@ -239,7 +240,7 @@ def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
         "origin": FRONTEND,
         "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0",
     }
-    proxies = _PROXY.get() if _PROXY else None
+    proxies = _PROXY.get() if (_PROXY and USE_PROXY) else None
     resp = requests.post(f"{API_BASE}{API_PATH}", headers=headers, json={"data": ed, "time": ts},
                          timeout=30, proxies=proxies)
     if resp.status_code != 200:
@@ -809,7 +810,16 @@ def main():
     parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
     parser.add_argument("-v", "--verbose", action="store_true", help="逐条打印失败 id 和原因")
     parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
+    parser.add_argument("--proxy", action="store_true", help="走 MySQL proxy 表里的住宅代理（绕 WAF，国内服务器抓取用）")
     args = parser.parse_args()
+
+    global USE_PROXY
+    if args.proxy:
+        if not _PROXY:
+            print("⚠️ proxy 表里没有启用的代理，--proxy 无效")
+        else:
+            USE_PROXY = True
+            print("[代理] 已启用 MySQL proxy 表里的住宅代理")
 
     db = DB()
 
