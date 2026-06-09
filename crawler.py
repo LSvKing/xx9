@@ -672,11 +672,13 @@ def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 2
 
 def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000,
                    shard=None, verbose: bool = False):
-    """全量回填：从当前最大 id 往下枚举到 1，逐个取详情，写入 videos。
+    """全量回填：从库里已有的最大 id 往下枚举到 1，逐个取详情，写入 videos。
+    - 起点：首跑从 DB 已有的最大 id 起（更大的是新数据，归 --refresh，backfill 不碰；
+      也省掉问站点 maxId）；库空才回退站点 maxId。续传则从 progress.page 继续。
     - 排重：每块先剔除已抓过(detail_at 非空)的 id，不重复请求
     - 断点续传：progress.page = 已回填到的最低 id
     - 分片(shard=(k,N))：只抓 id%N==k 的，多机各跑一个通道并行，互不重复。
-      每个通道独立进度行 __backfill_k/N__，独立续传。
+      每个通道独立进度行 __backfill_k/N__，独立续传；起点取该通道在库里的最大 id。
     """
     if shard is None:
         tag, lbl = "__backfill__", "回填"
@@ -691,7 +693,14 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
         next_id = prog["page"] - 1
         top = prog["total"] or next_id
     else:
-        top = get_max_id()
+        # 首跑：从库里已有的最大 id 起（更大的是新数据，交给 --refresh，backfill 不碰），
+        # 顺带省掉一次问站点的 API；库里该通道还没数据才回退站点 maxId。
+        if shard is None:
+            dbmax = db.query("SELECT MAX(id) AS m FROM videos")[0]["m"]
+        else:
+            dbmax = db.query("SELECT MAX(id) AS m FROM videos WHERE MOD(id,%s)=%s",
+                             (shard[1], shard[0]))[0]["m"]
+        top = int(dbmax) if dbmax else get_max_id()
         next_id = top
     if next_id < 1:
         print(f"[{lbl}] 已完成（已到 id=1）")
