@@ -95,15 +95,10 @@ function browse(patch) {
   if (parseHash().source === 'home') patch.source = 'all';   // 首页不支持筛选，切到全部
   setHash(patch);
 }
-let searchTimer, composing = false;
-function doSearch(val) {
-  clearTimeout(searchTimer);
-  // 搜索一律全局（切到"全部"），否则在收藏/历史页只在那一小撮里搜，像搜不到
-  searchTimer = setTimeout(() => browse({ q: val.trim(), source: 'all', v: null, theme: null }), 350);
-}
-$('#search').addEventListener('compositionstart', () => composing = true);
-$('#search').addEventListener('compositionend', e => { composing = false; doSearch(e.target.value); });  // 中文组词完成才搜
-$('#search').addEventListener('input', e => { if (!composing) doSearch(e.target.value); });               // 组词中不搜
+// 回车提交搜索（一律全局，切到"全部"）；输入法组词中的回车是确认候选，不触发
+function doSearch(val) { browse({ q: val.trim(), source: 'all', v: null, theme: null }); }
+$('#search').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) doSearch(e.target.value); });
+$('#search').addEventListener('search', e => { if (!e.target.value.trim()) doSearch(''); });   // type=search 的 × 清空 → 回到全部
 $('#group').onchange = e => browse({ g: +e.target.value, v: null, theme: null });
 $('#sort').onchange = e => browse({ sort: e.target.value, v: null });
 document.querySelectorAll('header nav a, .brand').forEach(a => {
