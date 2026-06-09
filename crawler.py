@@ -432,25 +432,50 @@ def preflight(workers: int = 5, samples: int = 20, min_rate: float = 0.7) -> boo
     return True
 
 
+def _err_reason(e) -> str:
+    """把异常归成可读的失败原因。"""
+    n = type(e).__name__
+    s = str(e)
+    if "Padding" in s or "padding" in s:
+        return "WAF拦截/解密失败"
+    if "Timeout" in n or "timed out" in s.lower():
+        return "超时"
+    if "403" in s:
+        return "403限速"
+    if "ProxyError" in n:
+        return "代理错误"
+    if "SSL" in n or "SSL" in s:
+        return "SSL错误"
+    if "Connection" in n or "Connection" in s:
+        return "连接失败"
+    if s.startswith("HTTP "):
+        return s[:12]
+    return n
+
+
 def _fetch_detail(vid, retries: int = 4):
-    """抓单条详情，失败重试 + 退避。彻底失败返回 None。"""
+    """抓单条详情，失败重试 + 退避。成功返回 dict；彻底失败返回原因字符串。"""
+    reason = "未知"
     for att in range(retries):
         try:
-            return api_call(f"cms/vod/detail/{vid}", method=1)
-        except Exception:
+            return api_call(f"cms/vod/detail/{vid}", method=1)   # dict = 成功
+        except Exception as e:
+            reason = _err_reason(e)
             if att < retries - 1:
                 time.sleep(0.5 * (att + 1))   # 0.5/1/1.5s 退避
-    return None
+    return reason   # str = 失败原因
 
 
-def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str):
+def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str, verbose: bool = False):
     """并发抓 ids 的详情，批量写库（网络并发 / DB 写在主线程串行批量）。
     一条详情即一整行 videos（列表字段+详情字段），insert_details_batch 一次写全。
     单条失败会重试，整轮结束后对仍失败的 id 再整体重试一轮。
+    verbose=True 时逐条打印失败 id+原因。
     返回 (ok 成功, gap 空洞即已删除id, err 最终仍失败)。"""
     total = len(ids)
     done = ok = gap = 0
     failed = []
+    reasons = {}
     start = time.time()
     det_buf = []
 
@@ -462,8 +487,11 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str):
     def consume(vid, data, show=True):
         nonlocal done, ok, gap
         done += 1
-        if data is None:
+        if isinstance(data, str):                 # 失败，data 是原因字符串
             failed.append(vid)
+            reasons[data] = reasons.get(data, 0) + 1
+            if verbose:
+                print(f"\n  ✗ id={vid} 失败: {data}", flush=True)
         elif (data.get("result") or {}).get("vod", {}).get("id"):
             ok += 1
             det_buf.append(data)
@@ -486,7 +514,7 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str):
     # 收尾：对仍失败的 id 再整体重试一轮（多为限速/网络抖动，缓一下多半能成）
     if failed:
         retry_ids = failed[:]
-        failed.clear()
+        failed.clear(); reasons.clear()           # 重试后的结果才是最终失败
         print(f"\n  [{label}] {len(retry_ids)} 个失败，缓 5s 后重试一轮 ...")
         time.sleep(5)
         with ThreadPoolExecutor(max_workers=max(2, workers // 2)) as pool:
@@ -495,10 +523,13 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str):
         flush()
 
     print()
+    if failed:                                    # 失败原因汇总（按数量降序）
+        rb = ", ".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1]))
+        print(f"  [{label}] 仍失败 {len(failed)} 个 | 原因: {rb}")
     return ok, gap, len(failed)
 
 
-def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 200):
+def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 200, verbose: bool = False):
     """补爬详情：从 items 里挑还没详情的 id（天然排重）。"""
     rows = db.query("SELECT id FROM videos WHERE detail_at IS NULL")
     ids = [r["id"] for r in rows]
@@ -506,12 +537,12 @@ def crawl_details(db: DB, tag: str = "__all__", workers: int = 5, batch: int = 2
         print("详情已全部爬取")
         return
     print(f"待爬详情: {len(ids)} 条, 并发{workers} 批量{batch}")
-    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="详情")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="详情", verbose=verbose)
     print(f"详情完成! 成功{ok} 空洞{gap} 失败{err}, 共 {db.count_details()} 条")
 
 
 def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000,
-                   shard=None):
+                   shard=None, verbose: bool = False):
     """全量回填：从当前最大 id 往下枚举到 1，逐个取详情，写入 videos。
     - 排重：每块先剔除已抓过(detail_at 非空)的 id，不重复请求
     - 断点续传：progress.page = 已回填到的最低 id
@@ -550,7 +581,7 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
         ids = [i for i in cand if i not in have]
         g_skip += len(cand) - len(ids)
         if ids:
-            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label=f"{lbl} {lo}-{cur}")
+            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label=f"{lbl} {lo}-{cur}", verbose=verbose)
             g_ok += ok; g_gap += gap; g_err += err
         db.set_progress(tag, lo, top, db.count_items())   # page=lo: 已回填到 lo
         print(f"[{lbl}] {lo}-{cur} 完成 | 累计 ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err} "
@@ -559,7 +590,7 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
     print(f"[{lbl}] 全部完成! ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err}")
 
 
-def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
+def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False):
     """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。"""
     max_id = get_max_id()
     have = int(db.query("SELECT MAX(id) AS m FROM videos")[0]["m"] or 0)
@@ -575,7 +606,7 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200):
         return
     ids = list(range(have + 1, max_id + 1))
     print(f"[增量] 库最大 id={have} -> 站点 maxId={max_id} | 新增 {len(ids)} 个待抓")
-    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量")
+    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
     print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
 
 
@@ -660,6 +691,7 @@ def main():
     parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
     parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
     parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
+    parser.add_argument("-v", "--verbose", action="store_true", help="逐条打印失败 id 和原因")
     parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
     args = parser.parse_args()
 
@@ -687,11 +719,11 @@ def main():
                         print(f"--shard 非法: k 必须在 0~{n-1}")
                         return
                     shard = (k, n)
-                crawl_backfill(db, args.workers, args.batch, shard=shard)
+                crawl_backfill(db, args.workers, args.batch, shard=shard, verbose=args.verbose)
             elif args.refresh:
-                crawl_refresh(db, args.workers, args.batch)
+                crawl_refresh(db, args.workers, args.batch, verbose=args.verbose)
             else:
-                crawl_details(db, "__all__", args.workers, args.batch)
+                crawl_details(db, "__all__", args.workers, args.batch, verbose=args.verbose)
             return
 
         # 无参数：打印状态和用法菜单
