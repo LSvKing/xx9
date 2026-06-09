@@ -183,6 +183,69 @@ async function renderHome() {
 let hls = null;
 const video = $('#video');
 let curId = null;
+let lineList = [], playOrder = [], slot = 0;
+const isOversea = (n) => /海/.test(n || '');               // 海线判定（排在国线后）
+
+function toast(msg) {
+  let t = $('#toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  t.textContent = msg; t.className = 'toast show';
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.className = 'toast'; }, 2600);
+}
+function playLine(idx, keepTime) {                         // 播指定线路（lineList 原始下标），保留进度
+  if (idx == null || !lineList[idx]) return;
+  $('#line-sel').value = idx;
+  const t = keepTime ? video.currentTime : 0;
+  playSource(lineList[idx].url);
+  if (keepTime && t > 1) video.addEventListener('loadedmetadata',
+    () => { try { video.currentTime = t; } catch (e) {} }, { once: true });
+}
+
+// ---- 测速选线（手动按钮触发，不自动切，避免误判）----
+function firstSegUrl(m3u8Text, baseUrl) {                  // m3u8 里第一个分片的绝对地址
+  for (const ln of m3u8Text.split('\n')) {
+    const s = ln.trim();
+    if (s && !s.startsWith('#')) return new URL(s, baseUrl).href;
+  }
+  return null;
+}
+async function probeLine(idx, ms = 1500) {                 // 拉第一个分片，限时读流计字节 → KB/s
+  try {
+    const m3u8 = lineList[idx].url;
+    const txt = await fetch(m3u8, { cache: 'no-store' }).then(r => r.text());
+    const seg = firstSegUrl(txt, m3u8);
+    if (!seg) return { idx, kbps: 0 };
+    const ctrl = new AbortController();
+    const resp = await fetch(seg, { signal: ctrl.signal, cache: 'no-store' });
+    const reader = resp.body.getReader();
+    const t0 = performance.now(); let bytes = 0;
+    while (performance.now() - t0 < ms) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+    }
+    ctrl.abort();
+    const sec = (performance.now() - t0) / 1000;
+    return { idx, kbps: sec > 0 ? (bytes / 1024) / sec : 0 };
+  } catch (e) { return { idx, kbps: 0 }; }
+}
+async function probeAndSwitch() {                          // 只测国线，逐条测（各自独占带宽更准），切到最快
+  const btn = $('#probe-btn');
+  const cands = playOrder.filter(i => !isOversea(lineList[i].name));
+  const list = cands.length ? cands : playOrder;
+  if (list.length < 2) { toast('只有一条线路，无需测速'); return; }
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '测速中…';
+  const results = [];
+  for (const idx of list) results.push(await probeLine(idx));
+  btn.disabled = false; btn.textContent = old;
+  const ok = results.filter(r => r.kbps > 0).sort((a, b) => b.kbps - a.kbps);
+  if (!ok.length) { toast('测速失败，请手动切换线路'); return; }
+  const best = ok[0];
+  slot = Math.max(0, playOrder.indexOf(best.idx));
+  toast(`最快「${lineList[best.idx].name}」≈${best.kbps.toFixed(0)} KB/s，已切换`);
+  playLine(best.idx, true);
+}
+$('#probe-btn').onclick = probeAndSwitch;
 
 function openPlayer(id) { setHash({ v: id }); }          // 改 hash，由 route 打开
 function closePlayer() {                                  // × / Esc / 点外面
@@ -210,19 +273,20 @@ async function _openPlayer(id) {
   const fname = (v.title || id).replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
   $('#dl-btn').onclick = (e) => { e.preventDefault(); downloadHls(lines[+sel.value].url, fname, $('#dl-btn')); };
 
-  // 线路选择
+  // 线路：国线优先、海线垫底（自动只在国线间切，海线仅手动/最后兜底）
   const sel = $('#line-sel');
   const lines = v.lines && v.lines.length ? v.lines : (v.sources || []).map((u, i) => ({ name: '线路' + (i + 1), url: u }));
   if (!lines.length) { closePlayer(); alert('暂时无法播放：可能已下架或接口繁忙，稍后再试'); return; }  // 无播放源/取地址失败
-  sel.innerHTML = lines.map((l, i) => `<option value="${i}">${esc(l.name)}</option>`).join('');
-  sel.style.display = lines.length > 1 ? '' : 'none';
-  sel.onchange = () => {
-    const t = video.currentTime;
-    playSource(lines[+sel.value].url);
-    video.addEventListener('loadedmetadata', () => { try { video.currentTime = t; } catch (e) {} }, { once: true });
-  };
+  lineList = lines;
+  const guo = lines.map((l, i) => i).filter(i => !isOversea(lines[i].name));
+  const hai = lines.map((l, i) => i).filter(i => isOversea(lines[i].name));
+  playOrder = guo.concat(hai);                             // 国线在前、海线在后；缺哪类就用现有的
+  sel.innerHTML = playOrder.map(i => `<option value="${i}">${esc(lines[i].name)}</option>`).join('');
+  sel.style.display = playOrder.length > 1 ? '' : 'none';
+  sel.onchange = () => { slot = Math.max(0, playOrder.indexOf(+sel.value)); playLine(+sel.value, true); };
 
-  playSource(lines.length ? lines[0].url : null);
+  slot = 0;
+  playLine(playOrder[0], false);
   api('/api/history/' + id, { method: 'POST' });   // 记历史
   $('#player').classList.remove('hidden');
 }
@@ -231,8 +295,13 @@ function playSource(src) {
   if (!src) return;
   if (hls) { hls.destroy(); hls = null; }
   if (window.Hls && Hls.isSupported()) {       // 优先 hls.js（Chrome/安卓）
-    hls = new Hls({ maxBufferLength: 30 });
-    hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) console.error('HLS', d.type, d.details); });
+    // 大缓冲：提前多缓，扛住网络抖动少卡顿
+    hls = new Hls({ maxBufferLength: 90, maxMaxBufferLength: 300, maxBufferSize: 60 * 1000 * 1000 });
+    hls.on(Hls.Events.ERROR, (e, d) => {
+      if (!d.fatal) return;
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (_) {} }
+      toast('该线路连不上，点「⚡测速选线」换一条');   // 不自动切，提示用户
+    });
     hls.loadSource(src);
     hls.attachMedia(video);
   } else {                                       // Safari/iOS 原生 HLS

@@ -79,3 +79,9 @@ header nav a.active { background: var(--acc); color: #fff; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tags span { background: var(--bg); color: var(--mut); font-size: 11px; padding: 3px 8px; border-radius: 12px; cursor: pointer; }
 .tags span:hover { color: var(--acc); }
+
+/* 测速/切线提示 toast */
+#toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 60;
+  background: rgba(0,0,0,.86); color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 13px;
+  opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 80%; text-align: center; }
+#toast.show { opacity: 1; }
