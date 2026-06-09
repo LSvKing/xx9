@@ -377,18 +377,29 @@ class DB:
         finally:
             boot.close()
 
+    def _new_conn(self):
+        return pymysql.connect(
+            host=self.cfg["host"], port=int(self.cfg.get("port", 3306)),
+            user=self.cfg["user"], password=self.cfg.get("password", ""),
+            database=self.cfg["database"], charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+        )
+
     @property
     def conn(self):
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = pymysql.connect(
-                host=self.cfg["host"], port=int(self.cfg.get("port", 3306)),
-                user=self.cfg["user"], password=self.cfg.get("password", ""),
-                database=self.cfg["database"], charset="utf8mb4",
-                cursorclass=pymysql.cursors.DictCursor, autocommit=True,
-            )
-        # 长时间运行防止 "MySQL server has gone away"
-        self._local.conn.ping(reconnect=True)
-        return self._local.conn
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._local.conn = self._new_conn()
+            return c
+        try:
+            c.ping(reconnect=False)          # 探活；连接死了就重建（避开已弃用的 reconnect=True）
+        except Exception:
+            try:
+                c.close()
+            except Exception:
+                pass
+            c = self._local.conn = self._new_conn()
+        return c
 
     def query(self, sql: str, params=()) -> list:
         with self.conn.cursor() as cur:
@@ -516,10 +527,12 @@ def get_max_id() -> int:
     return int(r["data"][0]["id"])
 
 
-def preflight(workers: int = 5, samples: int = 20, min_rate: float = 0.7) -> bool:
+def preflight(workers: int = 5, samples: int = 20, min_rate: float = None) -> bool:
     """开抓前连通性自检：先取 maxId（测搜索接口+token），再并发抓一批样本详情，
     统计成功率。FAT20001（已删除）也算连通成功；只有网络错/超时/非200算失败。
-    成功率低于 min_rate 返回 False（多半是本机出口 IP 被限速/封禁或代理不通）。"""
+    成功率低于 min_rate 返回 False。走代理时住宅IP本身抖动+爬取有重试，阈值放宽到 40%。"""
+    if min_rate is None:
+        min_rate = 0.4 if USE_PROXY else 0.7
     try:
         max_id = get_max_id()
     except Exception as e:
@@ -539,12 +552,11 @@ def preflight(workers: int = 5, samples: int = 20, min_rate: float = 0.7) -> boo
         results = list(pool.map(one, ids))
     ok = sum(1 for r in results if r)
     rate = ok / len(ids)
-    print(f"[自检] maxId={max_id} | 并发{workers} 样本{len(ids)} 成功{ok} 成功率{rate*100:.0f}%")
+    tip = "（代理模式，爬取有重试，阈值已放宽）" if USE_PROXY else ""
+    print(f"[自检] maxId={max_id} | 并发{workers} 样本{len(ids)} 成功{ok} 成功率{rate*100:.0f}% {tip}")
     if rate < min_rate:
-        print(f"[自检] ⚠️ 成功率过低（<{int(min_rate*100)}%），本机出口 IP 可能被限速/封禁，或代理不稳。")
-        print("       建议任选一: ① 换代理节点  ② 换台机器跑（同一远程库，数据不影响）")
-        print(f"                  ③ 降并发重试，如 -w 2  ④ 等一会儿让限速恢复")
-        print("       要跳过自检强行跑加 --no-check")
+        print(f"[自检] ⚠️ 成功率过低（<{int(min_rate*100)}%）。" + ("代理/住宅IP不稳或被限。" if USE_PROXY else "本机出口IP可能被限速/封禁。"))
+        print("       建议: ① 多买几个青果IP  ② 降并发 -w 2  ③ 等会儿恢复  ④ --no-check 跳过自检强行跑")
         return False
     return True
 
