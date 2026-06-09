@@ -260,7 +260,22 @@ def main():
         print(f"  当前捕获: {cap}")
         raise SystemExit(1)
     if not cap["access_token"]:
-        print("  (注: access_token 没抓到，但接口只认 jwt_token，不影响)")
+        # 详情/播放接口必须有 access_token（搜索不需要），它较稳定：抓不到就沿用库里最近一个有效的
+        try:
+            conn0 = mysql_conn(cfg)
+            with conn0.cursor() as cur0:
+                cur0.execute("SELECT access_token FROM credentials WHERE access_token IS NOT NULL "
+                             "AND access_token<>'' ORDER BY id DESC LIMIT 1")
+                r0 = cur0.fetchone()
+            conn0.close()
+            if r0:
+                cap["access_token"] = r0["access_token"]
+                print(f"  access_token 没抓到，沿用库里最近有效的: {cap['access_token'][:12]}...")
+        except Exception:
+            pass
+        if not cap["access_token"]:
+            print("  ⚠️ access_token 没抓到、库里也没有 → 详情/播放接口会报 1032，"
+                  "需换个能完整登录的入口（如默认 xx9.com/enter）重抓")
 
     frontend = (cap["origin"] or "").rstrip("/")
     if not frontend and cap["final_url"]:
