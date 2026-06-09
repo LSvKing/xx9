@@ -50,6 +50,7 @@ def _load_config():
         "jwt_token": "",
         "web_password": "xx9",                          # 前端登录密码
         "web_secret": "change-this-secret",             # cookie 签名密钥
+        "proxy": {},                                    # 青果住宅代理池(可选)：{query_url, get_url, auth}
 
         "keys": [
             "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
@@ -117,6 +118,50 @@ else:
     CREDS_SOURCE = "config.json（DB 无凭证，已回退）"
 
 
+class _ProxyPool:
+    """青果住宅代理池：query 拿当前在用 IP 并轮换；池空时尝试 get 提取（每天0点通道空出后自愈）。"""
+    def __init__(self, cfg: dict):
+        self.query_url = cfg.get("query_url")
+        self.get_url = cfg.get("get_url")
+        self.auth = cfg.get("auth", "")
+        self.proxies = []
+        self.t = 0.0
+        self.i = 0
+        self.lock = threading.Lock()
+
+    def _servers(self):
+        data = requests.get(self.query_url, timeout=10).json()
+        return [d.get("server") for d in (data.get("data") or []) if d.get("server")]
+
+    def _refresh(self):
+        try:
+            servers = self._servers()
+            if not servers and self.get_url:        # 没在用 IP（如0点重置后），尝试提取
+                for _ in range(3):
+                    try:
+                        requests.get(self.get_url, timeout=10)
+                    except Exception:
+                        pass
+                servers = self._servers()
+            self.proxies = [f"http://{self.auth}@{s}" for s in servers]
+        except Exception:
+            pass
+        self.t = time.time()
+
+    def get(self):
+        with self.lock:
+            if time.time() - self.t > 120 or not self.proxies:
+                self._refresh()
+            if not self.proxies:
+                return None
+            p = self.proxies[self.i % len(self.proxies)]
+            self.i += 1
+            return {"http": p, "https": p}
+
+
+_PROXY = _ProxyPool(_cfg["proxy"]) if _cfg.get("proxy", {}).get("query_url") else None
+
+
 def aes_enc(key: str, plain: str) -> str:
     c = AES.new(key.encode(), AES.MODE_ECB)
     return base64.b64encode(c.encrypt(pad(plain.encode(), 16))).decode()
@@ -138,7 +183,9 @@ def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
         "origin": FRONTEND,
         "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0",
     }
-    resp = requests.post(f"{API_BASE}{API_PATH}", headers=headers, json={"data": ed, "time": ts}, timeout=30)
+    proxies = _PROXY.get() if _PROXY else None
+    resp = requests.post(f"{API_BASE}{API_PATH}", headers=headers, json={"data": ed, "time": ts},
+                         timeout=30, proxies=proxies)
     if resp.status_code != 200:
         raise Exception(f"HTTP {resp.status_code}")
     data = resp.json()

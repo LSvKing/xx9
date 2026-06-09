@@ -12,6 +12,13 @@
   "web_password": "xx9",
   "web_secret": "change-this-secret",
 
+  "_proxy说明": "可选。API 躲在反代理 CDN 后会拦机房代理，需住宅代理（如青果）。配了 crawler 的 api_call 自动走代理池+轮换；不配则直连。",
+  "proxy": {
+    "get_url": "https://longterm.proxy.qg.net/get?key=YOUR_KEY",
+    "query_url": "https://longterm.proxy.qg.net/query?key=YOUR_KEY",
+    "auth": "AuthKey:AuthPwd"
+  },
+
   "keys": [
     "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
     "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
