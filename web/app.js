@@ -95,11 +95,14 @@ function browse(patch) {
   if (parseHash().source === 'home') patch.source = 'all';   // 首页不支持筛选，切到全部
   setHash(patch);
 }
-let searchTimer;
-$('#search').addEventListener('input', e => {
+let searchTimer, composing = false;
+function doSearch(val) {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => browse({ q: e.target.value.trim(), v: null, theme: null }), 350);
-});
+  searchTimer = setTimeout(() => browse({ q: val.trim(), v: null, theme: null }), 350);
+}
+$('#search').addEventListener('compositionstart', () => composing = true);
+$('#search').addEventListener('compositionend', e => { composing = false; doSearch(e.target.value); });  // 中文组词完成才搜
+$('#search').addEventListener('input', e => { if (!composing) doSearch(e.target.value); });               // 组词中不搜
 $('#group').onchange = e => browse({ g: +e.target.value, v: null, theme: null });
 $('#sort').onchange = e => browse({ sort: e.target.value, v: null });
 document.querySelectorAll('header nav a, .brand').forEach(a => {
@@ -210,6 +213,7 @@ async function _openPlayer(id) {
   // 线路选择
   const sel = $('#line-sel');
   const lines = v.lines && v.lines.length ? v.lines : (v.sources || []).map((u, i) => ({ name: '线路' + (i + 1), url: u }));
+  if (!lines.length) { closePlayer(); alert('暂时无法播放：可能已下架或接口繁忙，稍后再试'); return; }  // 无播放源/取地址失败
   sel.innerHTML = lines.map((l, i) => `<option value="${i}">${esc(l.name)}</option>`).join('');
   sel.style.display = lines.length > 1 ? '' : 'none';
   sel.onchange = () => {
