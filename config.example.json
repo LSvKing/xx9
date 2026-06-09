@@ -1,5 +1,5 @@
 {
-  "_说明": "只需配 mysql / web_password / web_secret / keys。api域名、token、CDN前缀(media/pic/mp4)由 fetch_creds.py 抓取写入 credentials 表，程序自动读，无需在此填写。",
+  "_说明": "config.json 只需 mysql 连接 + 一份回退值。其余配置都走 MySQL 表，程序优先读库、缺了才回退本文件：credentials 表(api域名/token/CDN前缀，fetch_creds.py 写)、settings 表(keys/web_password/web_secret)、proxy 表(住宅代理 get_url/query_url/auth)。",
 
   "mysql": {
     "host": "localhost",
@@ -11,13 +11,6 @@
 
   "web_password": "xx9",
   "web_secret": "change-this-secret",
-
-  "_proxy说明": "可选。API 躲在反代理 CDN 后会拦机房代理，需住宅代理（如青果）。配了 crawler 的 api_call 自动走代理池+轮换；不配则直连。",
-  "proxy": {
-    "get_url": "https://longterm.proxy.qg.net/get?key=YOUR_KEY",
-    "query_url": "https://longterm.proxy.qg.net/query?key=YOUR_KEY",
-    "auth": "AuthKey:AuthPwd"
-  },
 
   "keys": [
     "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",

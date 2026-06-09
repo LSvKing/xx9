@@ -91,9 +91,65 @@ def _load_creds_from_db(mysql_cfg: dict):
         return None
 
 
+def _db_conn(mysql_cfg: dict):
+    return pymysql.connect(
+        host=mysql_cfg["host"], port=int(mysql_cfg.get("port", 3306)),
+        user=mysql_cfg["user"], password=mysql_cfg.get("password", ""),
+        database=mysql_cfg["database"], charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor, connect_timeout=5,
+    )
+
+
+def _load_settings_from_db(mysql_cfg: dict) -> dict:
+    """从 MySQL settings 表读共享配置(k->v, v 为 JSON)。无表/连不上返回 {}。
+    让 web_password / keys 等集中存库，多机共享，config.json 只留 mysql 连接。"""
+    try:
+        conn = _db_conn(mysql_cfg)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT k, v FROM settings")
+                out = {}
+                for r in cur.fetchall():
+                    try:
+                        out[r["k"]] = json.loads(r["v"])
+                    except Exception:
+                        out[r["k"]] = r["v"]
+                return out
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def _load_proxy_from_db(mysql_cfg: dict):
+    """从 MySQL proxy 表读启用的代理配置（最新一条 enabled=1）。无则返回 None。"""
+    try:
+        conn = _db_conn(mysql_cfg)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT get_url, query_url, auth FROM proxy "
+                            "WHERE enabled=1 ORDER BY id DESC LIMIT 1")
+                return cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 _cfg = _load_config()
 MYSQL = _cfg["mysql"]
 API_PATH = "/fast-endecode/main/request"
+
+# 共享配置(keys/密码)优先从 MySQL settings 表读，覆盖 config.json
+_settings = _load_settings_from_db(MYSQL)
+for _k in ("keys", "web_password", "web_secret"):
+    if _settings.get(_k):
+        _cfg[_k] = _settings[_k]
+# 代理配置优先从 MySQL proxy 表读，覆盖 config.json
+_proxy_db = _load_proxy_from_db(MYSQL)
+if _proxy_db and _proxy_db.get("query_url"):
+    _cfg["proxy"] = _proxy_db
+
 KEYS = _cfg["keys"]
 
 # 域名/token 优先用 MySQL credentials 表里最新一条；取不到则回退 config.json
@@ -263,6 +319,19 @@ SCHEMA = [
         total INT,
         collected INT,
         updated_at VARCHAR(32)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS settings (
+        k VARCHAR(64) PRIMARY KEY,
+        v TEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS proxy (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        name VARCHAR(64),
+        get_url VARCHAR(255),
+        query_url VARCHAR(255),
+        auth VARCHAR(255),
+        enabled INT DEFAULT 1,
+        created_at VARCHAR(32)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
 ]
 
