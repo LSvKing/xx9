@@ -98,7 +98,8 @@ function browse(patch) {
 let searchTimer, composing = false;
 function doSearch(val) {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => browse({ q: val.trim(), v: null, theme: null }), 350);
+  // 搜索一律全局（切到"全部"），否则在收藏/历史页只在那一小撮里搜，像搜不到
+  searchTimer = setTimeout(() => browse({ q: val.trim(), source: 'all', v: null, theme: null }), 350);
 }
 $('#search').addEventListener('compositionstart', () => composing = true);
 $('#search').addEventListener('compositionend', e => { composing = false; doSearch(e.target.value); });  // 中文组词完成才搜
