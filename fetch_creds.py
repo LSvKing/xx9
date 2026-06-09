@@ -186,7 +186,7 @@ def fetch_cdn_prefixes(api_base, access_token, jwt_token, origin, keys) -> dict:
 # ============================================================
 # Playwright 抓取
 # ============================================================
-async def capture(url: str, headful: bool) -> dict:
+async def capture(url: str, headful: bool, keys: list) -> dict:
     from playwright.async_api import async_playwright
 
     captured = {"api_base": None, "access_token": None, "jwt_token": None,
@@ -206,19 +206,37 @@ async def capture(url: str, headful: bool) -> dict:
                     captured["api_base"] = m.group(1)
             for h, k in [("accesstoken", "access_token"), ("jwttoken", "jwt_token"), ("origin", "origin")]:
                 v = req.headers.get(h)
-                if v and not captured[k if k != "origin" else "origin"]:
-                    captured[k if k != "origin" else "origin"] = v
+                if v and not captured[k]:
+                    captured[k] = v
+
+    # access_token 不在前几个请求里（要等 user/register/free 之后才带）；
+    # 直接从接口响应里解出 accessToken，最早、最可靠
+    def on_response(resp):
+        if "fast-endecode" not in resp.url or captured["access_token"]:
+            return
+        async def grab():
+            try:
+                j = await resp.json()
+                t = int(j.get("time", 0))
+                raw = unpad(AES.new(keys[t % 10].encode(), AES.MODE_ECB).decrypt(base64.b64decode(j["data"])), 16)
+                m = re.search(rb'"accessToken"\s*:\s*"([^"]+)"', raw)
+                if m and not captured["access_token"]:
+                    captured["access_token"] = m.group(1).decode()
+            except Exception:
+                pass
+        asyncio.create_task(grab())
 
     page.on("request", on_request)
+    page.on("response", on_response)
 
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
         pass  # SPA 常超时，忽略，靠下面的等待收集请求
-    # 给 app 时间发起 jwt-token / config 等请求
-    for _ in range(12):
+    # 等齐 api_base + jwt + access_token（access_token 要等注册接口，给足时间）
+    for _ in range(20):
         await asyncio.sleep(1)
-        if captured["api_base"] and captured["jwt_token"]:   # access_token 现已可选
+        if captured["api_base"] and captured["jwt_token"] and captured["access_token"]:
             break
     captured["final_url"] = page.url
 
@@ -251,7 +269,7 @@ def main():
         return
 
     print(f"打开 {args.url} 抓取域名/token ...")
-    cap = asyncio.run(capture(args.url, args.headful))
+    cap = asyncio.run(capture(args.url, args.headful, get_keys(cfg)))
 
     if not cap["api_base"] or not cap["jwt_token"]:   # access_token 现已可选，只要这俩
         print("未捕获到 API 域名/jwt_token，可能原因:")
