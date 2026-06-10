@@ -203,11 +203,14 @@ else:
 
 
 class _ProxyPool:
-    """青果住宅代理池：query 拿当前在用 IP 并轮换；池空时尝试 get 提取（每天0点通道空出后自愈）。"""
+    """青果住宅代理池：query 拿当前在用 IP 并轮换；不足目标数就 get 补满
+    （IP 逐个到期会让池子 3→2→1 缩水，只剩一个时还硬扛会触发 WAF per-IP 限速，
+    所以补到 size 而不是等全空才补；每天0点整体重置后也自愈）。"""
     def __init__(self, cfg: dict):
         self.query_url = cfg.get("query_url")
         self.get_url = cfg.get("get_url")
         self.auth = cfg.get("auth", "")
+        self.size = int(cfg.get("size", 3))     # 目标 IP 数（= 买的通道数）
         self.proxies = []
         self.t = 0.0
         self.i = 0
@@ -220,8 +223,9 @@ class _ProxyPool:
     def _refresh(self):
         try:
             servers = self._servers()
-            if not servers and self.get_url:        # 没在用 IP（如0点重置后），尝试提取
-                for _ in range(3):
+            # 不足目标数就补：每次 get 进一个空闲通道；通道占满时返回"无空闲"无害
+            if self.get_url and len(servers) < self.size:
+                for _ in range(self.size - len(servers)):
                     try:
                         requests.get(self.get_url, timeout=10)
                     except Exception:
