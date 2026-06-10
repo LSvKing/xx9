@@ -142,6 +142,45 @@ def _load_proxy_from_db(mysql_cfg: dict):
         return None
 
 
+def set_setting(key: str, value, mysql_cfg: dict = None) -> bool:
+    """写入/更新 settings 表（value 自动 JSON 序列化）。用于把实时接口拿到的
+    轻量字典（如专题名）持久化，接口连不上时离线兜底。"""
+    try:
+        conn = _db_conn(mysql_cfg or MYSQL)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO settings (k, v) VALUES (%s, %s) "
+                    "ON DUPLICATE KEY UPDATE v=VALUES(v)",
+                    (key, json.dumps(value, ensure_ascii=False)))
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def get_setting(key: str, default=None, mysql_cfg: dict = None):
+    """从 settings 表读单个键（v 反 JSON）。无表/连不上/无键返回 default。"""
+    try:
+        conn = _db_conn(mysql_cfg or MYSQL)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT v FROM settings WHERE k=%s", (key,))
+                row = cur.fetchone()
+                if row:
+                    try:
+                        return json.loads(row["v"])
+                    except Exception:
+                        return row["v"]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return default
+
+
 _cfg = _load_config()
 MYSQL = _cfg["mysql"]
 API_PATH = "/fast-endecode/main/request"

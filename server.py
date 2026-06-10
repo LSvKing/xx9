@@ -266,16 +266,27 @@ _theme_names = {"t": 0.0, "data": {}}
 
 
 def theme_names() -> dict:
-    if time.time() - _theme_names["t"] > 86400 or not _theme_names["data"]:
-        try:
-            r = c.api_call("theme/list", method=1)
-            lst = (r.get("data") or {}).get("list") or []
-            d = {t["id"]: t.get("title") for t in lst if t.get("id")}
-            if d:
-                _theme_names["data"] = d
-                _theme_names["t"] = time.time()
-        except Exception:
-            pass
+    # 内存缓存有效就直接用
+    if time.time() - _theme_names["t"] <= 86400 and _theme_names["data"]:
+        return _theme_names["data"]
+    # 试实时接口：成功就刷新内存 + 回写 settings 表（离线兜底）
+    try:
+        r = c.api_call("theme/list", method=1)
+        lst = (r.get("data") or {}).get("list") or []
+        d = {t["id"]: t.get("title") for t in lst if t.get("id")}
+        if d:
+            _theme_names["data"] = d
+            _theme_names["t"] = time.time()
+            c.set_setting("theme_names", d)
+            return d
+    except Exception:
+        pass
+    # 实时接口连不上（代理/token 失效等）→ 用库里持久化的兜底，首页不再空白。
+    # JSON 序列化会把 int 键变成字符串，读回时转回 int 以匹配 themes 里的数字 id。
+    if not _theme_names["data"]:
+        stored = c.get_setting("theme_names")
+        if isinstance(stored, dict) and stored:
+            _theme_names["data"] = {int(k): v for k, v in stored.items()}
     return _theme_names["data"]
 
 
