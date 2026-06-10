@@ -182,11 +182,11 @@ let curId = null;
 let lineList = [], playOrder = [], slot = 0;
 const isOversea = (n) => /海/.test(n || '');               // 海线判定（排在国线后）
 
-function toast(msg) {
+function toast(msg, ms) {
   let t = $('#toast');
   if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
   t.textContent = msg; t.className = 'toast show';
-  clearTimeout(toast._t); toast._t = setTimeout(() => { t.className = 'toast'; }, 2600);
+  clearTimeout(toast._t); toast._t = setTimeout(() => { t.className = 'toast'; }, ms || 2600);
 }
 function playLine(idx, keepTime) {                         // 播指定线路（lineList 原始下标），保留进度
   if (idx == null || !lineList[idx]) return;
@@ -335,36 +335,81 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlayer(
 // ---------- 客户端直连下载（拉分片 + AES-128 解密 + 拼 .ts）----------
 function hexToBytes(h) { const a = new Uint8Array(h.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16); return a; }
 
+// 跨域 fetch 出错时把原因讲清楚（CORS / 鉴权 / 网络），别只甩一句“失败”
+async function dlFetch(url, what) {
+  let res;
+  try { res = await fetch(url, { credentials: 'omit' }); }
+  catch (e) { throw new Error(`${what}拉取失败（多半是跨域/CORS 被 CDN 挡）：${e.message}`); }
+  if (!res.ok) throw new Error(`${what}返回 ${res.status}${res.status === 403 ? '（可能需要鉴权头）' : ''}`);
+  return res;
+}
+
+// AES-CBC 解密：优先 Web Crypto（自带 PKCS7 去填充）；遇填充报错则按“无填充”整块回退
+async function aesCbcDecrypt(rawKey, iv, data) {
+  try {
+    const k = await crypto.subtle.importKey('raw', rawKey, 'AES-CBC', false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, k, data));
+  } catch (e) {
+    // OperationError = 末块不是合法 PKCS7。HLS 分片本应 PKCS7，但个别源不是 → 追加一个
+    // “解出来正好是合法 padding”的密文块，骗 Web Crypto 只剥这一块，真实数据全保留。
+    const encKey = await crypto.subtle.importKey('raw', rawKey, 'AES-CBC', false, ['encrypt']);
+    const last = new Uint8Array(data).slice(-16);
+    const want = new Uint8Array(16).fill(16);           // 期望解出 0x10 * 16
+    const xored = want.map((b, i) => b ^ last[i]);       // P_extra = dec(E) ^ C_last ⇒ dec(E)=want^C_last
+    const enc = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv: new Uint8Array(16) }, encKey, xored));
+    const E = enc.slice(0, 16);                          // = AES_enc(want ^ C_last)，零IV的CBC首块即ECB
+    const padded = new Uint8Array(data.byteLength + 16);
+    padded.set(new Uint8Array(data), 0); padded.set(E, data.byteLength);
+    const k = await crypto.subtle.importKey('raw', rawKey, 'AES-CBC', false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, k, padded));
+  }
+}
+
 async function downloadHls(m3u8Url, fname, btn) {
   if (btn.dataset.busy) return;
   btn.dataset.busy = '1';
   const orig = '⬇ 下载';
   try {
     btn.textContent = '解析…';
-    const txt = await (await fetch(m3u8Url)).text();
+    const txt = await (await dlFetch(m3u8Url, 'm3u8')).text();
     const base = m3u8Url.replace(/[^/]*$/, '');
-    let key = null, iv = new Uint8Array(16), hasIv = false;
+    // 嵌套 m3u8（master playlist）：指到子清单，跟进一层
+    if (/#EXT-X-STREAM-INF/.test(txt)) {
+      const sub = txt.split('\n').map(s => s.trim()).find(l => l && !l.startsWith('#'));
+      if (sub) return downloadHls(sub.startsWith('http') ? sub : base + sub, fname, btn);
+    }
+    let rawKey = null, iv = new Uint8Array(16), hasIv = false, seqBase = 0;
     const segs = [];
     for (const raw of txt.split('\n')) {
       const l = raw.trim();
-      if (l.startsWith('#EXT-X-KEY')) {
+      if (l.startsWith('#EXT-X-MEDIA-SEQUENCE')) {
+        seqBase = parseInt(l.split(':')[1], 10) || 0;
+      } else if (l.startsWith('#EXT-X-KEY')) {
+        const m = l.match(/METHOD=([A-Z0-9-]+)/);
+        if (m && m[1] === 'NONE') { rawKey = null; continue; }
         const u = l.match(/URI="([^"]+)"/), ivm = l.match(/IV=0x([0-9a-fA-F]+)/);
-        if (u) { const kb = await (await fetch(u[1])).arrayBuffer(); key = await crypto.subtle.importKey('raw', kb, 'AES-CBC', false, ['decrypt']); }
+        if (u) rawKey = new Uint8Array(await (await dlFetch(u[1].startsWith('http') ? u[1] : base + u[1], '解密密钥')).arrayBuffer());
         if (ivm) { iv = hexToBytes(ivm[1]); hasIv = true; }
       } else if (l && !l.startsWith('#')) {
         segs.push(l.startsWith('http') ? l : base + l);
       }
     }
-    if (!segs.length) throw new Error('no segments');
+    if (!segs.length) throw new Error('清单里没有分片');
+    if (rawKey && rawKey.length !== 16) throw new Error(`密钥长度异常(${rawKey.length}字节)，可能取到的是错误页`);
     const parts = [];
     for (let i = 0; i < segs.length; i++) {
-      let buf = await (await fetch(segs[i])).arrayBuffer();
-      if (key) {
+      let buf = await (await dlFetch(segs[i], `第${i + 1}片`)).arrayBuffer();
+      if (rawKey) {
         let useIv = iv;
-        if (!hasIv) { useIv = new Uint8Array(16); new DataView(useIv.buffer).setUint32(12, i); }  // 无显式IV则用分片序号
-        buf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: useIv }, key, buf);
+        if (!hasIv) {                                   // 无显式IV：用媒体序号(含 MEDIA-SEQUENCE 偏移)做 128bit 大端
+          useIv = new Uint8Array(16);
+          new DataView(useIv.buffer).setUint32(12, seqBase + i);
+        }
+        buf = await aesCbcDecrypt(rawKey, useIv, buf);
+      } else {
+        buf = new Uint8Array(buf);
       }
-      parts.push(new Uint8Array(buf));
+      parts.push(buf);
       btn.textContent = `下载 ${Math.round((i + 1) / segs.length * 100)}%`;
     }
     const a = document.createElement('a');
@@ -374,9 +419,11 @@ async function downloadHls(m3u8Url, fname, btn) {
     setTimeout(() => URL.revokeObjectURL(a.href), 15000);
     btn.textContent = '✓ 已下载';
   } catch (e) {
+    console.error('[下载失败]', e);
     btn.textContent = '下载失败';
+    toast('下载失败：' + (e && e.message ? e.message : e), 7000);
   }
-  setTimeout(() => { btn.textContent = orig; delete btn.dataset.busy; }, 2500);
+  setTimeout(() => { btn.textContent = orig; delete btn.dataset.busy; }, 4000);
 }
 
 // ---------- 初始化 ----------
