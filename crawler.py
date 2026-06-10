@@ -142,27 +142,10 @@ def _load_proxy_from_db(mysql_cfg: dict):
         return None
 
 
-def set_setting(key: str, value, mysql_cfg: dict = None) -> bool:
-    """写入/更新 settings 表（value 自动 JSON 序列化）。用于把实时接口拿到的
-    轻量字典（如专题名）持久化，接口连不上时离线兜底。"""
-    try:
-        conn = _db_conn(mysql_cfg or MYSQL)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO settings (k, v) VALUES (%s, %s) "
-                    "ON DUPLICATE KEY UPDATE v=VALUES(v)",
-                    (key, json.dumps(value, ensure_ascii=False)))
-            conn.commit()
-        finally:
-            conn.close()
-        return True
-    except Exception:
-        return False
-
-
 def get_setting(key: str, default=None, mysql_cfg: dict = None):
-    """从 settings 表读单个键（v 反 JSON）。无表/连不上/无键返回 default。"""
+    """从 settings 表读单个键（v 反 JSON）。无表/连不上/无键返回 default。
+    写入用 INSERT ... ON DUPLICATE KEY UPDATE，settings 表已持久化的字典
+    （如固定不变的 theme_names 专题名）由此读取，首页据此渲染。"""
     try:
         conn = _db_conn(mysql_cfg or MYSQL)
         try:
@@ -899,7 +882,6 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="逐条打印失败 id 和原因")
     parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
     parser.add_argument("--proxy", action="store_true", help="走 MySQL proxy 表里的住宅代理（绕 WAF，国内服务器抓取用）")
-    parser.add_argument("--seed-themes", action="store_true", help="抓一次 theme/list 写入 settings 表（首页专题名字典，固定不变，偶尔手动刷新）")
     args = parser.parse_args()
 
     global USE_PROXY
@@ -913,18 +895,6 @@ def main():
     db = DB()
 
     try:
-        if args.seed_themes:
-            r = api_call("theme/list", method=1)
-            lst = (r.get("data") or {}).get("list") or []
-            d = {t["id"]: t.get("title") for t in lst if t.get("id")}
-            if d and set_setting("theme_names", d):
-                print(f"已写入 settings.theme_names：{len(d)} 个专题")
-                for tid, name in list(d.items())[:5]:
-                    print(f"  {tid}: {name}")
-            else:
-                print(f"未写入（接口返回 {len(lst)} 条 / code={r.get('code')}），稍后重试或加 --proxy")
-            return
-
         if args.detail_id:
             data = api_call(f"cms/vod/detail/{args.detail_id}", method=1)
             db.insert_detail(data)
