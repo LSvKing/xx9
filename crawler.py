@@ -23,7 +23,13 @@ import argparse
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _now_iso() -> str:
+    """统一用 UTC 写时间戳，避免不同时区的机器写进 crawled_at/detail_at 的
+    本地时间无法比较/排序（带 +00:00 偏移，明确是 UTC）。"""
+    return datetime.now(timezone.utc).isoformat()
 
 import requests
 import pymysql
@@ -229,6 +235,29 @@ def aes_dec(key: str, b64: str) -> bytes:
     return unpad(c.decrypt(base64.b64decode(b64)), 16)
 
 
+def aes_dec_auto(b64: str, hint: int = None) -> bytes:
+    """解密响应：不信任服务端回传的 time（不同时区/时钟偏差会让 time%10 跟真正
+    加密用的 key 对不上），直接在 10 把 key 里试，能 unpad 且像 JSON 的就是对的。
+    hint 给个优先尝试的索引（一般是 data["time"]%10），命中则省去爆破。"""
+    raw = base64.b64decode(b64)
+    order = list(range(len(KEYS)))
+    if hint is not None:
+        order = [hint % len(KEYS)] + [i for i in order if i != hint % len(KEYS)]
+    last = None
+    for i in order:
+        try:
+            out = unpad(AES.new(KEYS[i].encode(), AES.MODE_ECB).decrypt(raw), 16)
+            s = out.lstrip()[:1]
+            if s in (b"{", b"["):          # 合法 JSON 起手，确认是对的 key
+                return out
+            last = out                      # 能 unpad 但不像 JSON，先留着兜底
+        except Exception:
+            continue
+    if last is not None:
+        return last
+    raise ValueError("无法用任何 key 解密响应（疑似 WAF 拦截返回的乱码）")
+
+
 def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
@@ -248,8 +277,7 @@ def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
     data = resp.json()
     if "data" not in data or "time" not in data:
         return data
-    rk = KEYS[data["time"] % 10]
-    return json.loads(aes_dec(rk, data["data"]))
+    return json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
 
 
 def _join(base: str, path: str) -> str:
@@ -436,7 +464,7 @@ class DB:
             item.get("readNumber"), item.get("likeNumber"), item.get("comments"),
             json.dumps(item.get("tags"), ensure_ascii=False),
             json.dumps(item.get("groups")), json.dumps(item.get("themes")),
-            item.get("createTime"), item.get("vodTime"), datetime.now().isoformat(),
+            item.get("createTime"), item.get("vodTime"), _now_iso(),
         )
 
     @staticmethod
@@ -458,7 +486,7 @@ class DB:
                 "nickName": author.get("nickName"), "avatar": author.get("avatar"),
                 "introduce": author.get("introduce"), "fansNum": author.get("fansNum"),
             }, ensure_ascii=False),
-            datetime.now().isoformat(),
+            _now_iso(),
         )
 
     @classmethod
@@ -513,7 +541,7 @@ class DB:
         self.execute("""
             REPLACE INTO progress (tag, page, total, collected, updated_at)
             VALUES (%s, %s, %s, %s, %s)
-        """, (tag, page, total, collected, datetime.now().isoformat()))
+        """, (tag, page, total, collected, _now_iso()))
 
     def close(self):
         if hasattr(self._local, "conn") and self._local.conn is not None:

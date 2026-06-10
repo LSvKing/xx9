@@ -11,7 +11,7 @@
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
@@ -84,7 +84,7 @@ def m3u8_url(addr):
 
 
 def now():
-    return datetime.now().isoformat()
+    return datetime.now(timezone.utc).isoformat()   # 统一 UTC，跨时区机器可比较
 
 
 # 图片是否加密（newH5ImageSecret，缓存 10 分钟；取不到默认按加密处理）

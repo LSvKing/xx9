@@ -22,7 +22,7 @@ import re
 import time
 import base64
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import requests
@@ -313,7 +313,7 @@ def main():
         "access_token": cap["access_token"],
         "jwt_token": cap["jwt_token"],
         "source_url": args.url,
-        "captured_at": datetime.now().isoformat(),
+        "captured_at": datetime.now(timezone.utc).isoformat(),
     }
 
     conn = ensure_table(cfg)
