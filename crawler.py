@@ -280,7 +280,11 @@ def aes_dec_auto(b64: str, hint: int = None) -> bytes:
     raise ValueError("无法用任何 key 解密响应（疑似 WAF 拦截返回的乱码）")
 
 
-def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
+def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
+             use_proxy: bool = None) -> dict:
+    """use_proxy: None=跟随全局 USE_PROXY；True/False=本次强制。
+    高频回填走代理轮换绕 WAF；低频的播放取地址传 False 走本机真实 IP，
+    独享、不跟回填挤在同一个被限速的住宅 IP 上。"""
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
     bp = json.dumps({"method": method, "params": params or {}, "uri": uri}, separators=(",", ":"))
@@ -291,9 +295,10 @@ def api_call(uri: str, method: int = 1, params: dict = None) -> dict:
         "origin": FRONTEND,
         "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0",
     }
-    proxies = _PROXY.get() if (_PROXY and USE_PROXY) else None
+    want_proxy = USE_PROXY if use_proxy is None else use_proxy
+    proxies = _PROXY.get() if (_PROXY and want_proxy) else None
     resp = requests.post(f"{API_BASE}{API_PATH}", headers=headers, json={"data": ed, "time": ts},
-                         timeout=30, proxies=proxies)
+                         timeout=timeout, proxies=proxies)
     if resp.status_code != 200:
         raise Exception(f"HTTP {resp.status_code}")
     data = resp.json()

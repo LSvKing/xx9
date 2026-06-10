@@ -75,6 +75,35 @@ def prefixes():
     return _pref
 
 
+# 播放签名地址缓存：vid -> (addr, t)。签名约 1 小时有效，30 分钟内复用，
+# 既减少"暂时无法播放"（少打抽风的实时接口），重开/秒切也更快。
+_play_cache = {}
+_PLAY_TTL = 1800
+
+
+def _fresh_addr(vid: int):
+    """实时取带签名的 m3u8 地址。命中缓存直接用；否则调 detail 接口，
+    代理/WAF 抽风时重试几次（_PROXY 每次轮换 IP，多试基本能成）。"""
+    hit = _play_cache.get(vid)
+    if hit and time.time() - hit[1] < _PLAY_TTL:
+        return hit[0]
+    addr = None
+    for _ in range(3):   # 短超时 + 重试；走本机真实 IP（不走代理，独享、不跟回填抢被限速的住宅 IP）
+        try:
+            d = c.api_call(f"cms/vod/detail/{vid}", method=1, timeout=12, use_proxy=False)
+            play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
+            if isinstance(play, str):
+                play = [{"addr": play}]
+            addr = next((p.get("addr") for p in play if p.get("addr")), None)
+            if addr:
+                break
+        except Exception:
+            pass
+    if addr:
+        _play_cache[vid] = (addr, time.time())
+    return addr
+
+
 def pic_url(path):
     return c._join(prefixes()["pic"], path or "")
 
@@ -188,15 +217,7 @@ def video_detail(vid: int, _=Depends(require_auth)):
         raise HTTPException(404, "不存在")
     v = rows[0]
     # 播放地址带时间签名会过期，必须实时从 API 取新鲜的（库里存的早过期 → 403）
-    addr = None
-    try:
-        d = c.api_call(f"cms/vod/detail/{vid}", method=1)
-        play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
-        if isinstance(play, str):
-            play = [{"addr": play}]
-        addr = next((p.get("addr") for p in play if p.get("addr")), None)
-    except Exception:
-        pass
+    addr = _fresh_addr(vid)
 
     # 同一签名地址套到各条线路（国线/海线），前端可切换
     pr = prefixes()
