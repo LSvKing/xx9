@@ -266,27 +266,15 @@ _theme_names = {"t": 0.0, "data": {}}
 
 
 def theme_names() -> dict:
-    # 内存缓存有效就直接用
-    if time.time() - _theme_names["t"] <= 86400 and _theme_names["data"]:
+    """专题名字典 id->title。分类是固定的，不走实时接口，只读 settings 表
+    (由 `crawler.py --seed-themes` 写入，5 分钟轻量重读以便改库后免重启生效)。
+    JSON 序列化会把 int 键变字符串，读回时转回 int 以匹配 themes 里的数字 id。"""
+    if time.time() - _theme_names["t"] <= 300 and _theme_names["data"]:
         return _theme_names["data"]
-    # 试实时接口：成功就刷新内存 + 回写 settings 表（离线兜底）
-    try:
-        r = c.api_call("theme/list", method=1)
-        lst = (r.get("data") or {}).get("list") or []
-        d = {t["id"]: t.get("title") for t in lst if t.get("id")}
-        if d:
-            _theme_names["data"] = d
-            _theme_names["t"] = time.time()
-            c.set_setting("theme_names", d)
-            return d
-    except Exception:
-        pass
-    # 实时接口连不上（代理/token 失效等）→ 用库里持久化的兜底，首页不再空白。
-    # JSON 序列化会把 int 键变成字符串，读回时转回 int 以匹配 themes 里的数字 id。
-    if not _theme_names["data"]:
-        stored = c.get_setting("theme_names")
-        if isinstance(stored, dict) and stored:
-            _theme_names["data"] = {int(k): v for k, v in stored.items()}
+    stored = c.get_setting("theme_names")
+    if isinstance(stored, dict) and stored:
+        _theme_names["data"] = {int(k): v for k, v in stored.items()}
+        _theme_names["t"] = time.time()
     return _theme_names["data"]
 
 
