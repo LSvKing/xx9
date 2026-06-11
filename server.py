@@ -41,7 +41,7 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET, max_age=30 * 24 * 3600)
 
 
 # ---- CDN 前缀（每 2 分钟实时从 config/query 拉，跟随域名轮换）----
-# 图片用 playLines[0]（快线，原站图片函数就取这条），视频 m3u8 用 h5_play_line（国线/海线，可切换）。
+# 图片优先 picBaseUrl（更稳）；playLines 偶尔会轮换出对浏览器不可用的死线（如 qv1tx 解析到 fake-ip 超时），故仅作兜底。视频 m3u8 用 h5_play_line（国线/海线，可切换）。
 _pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE, "lines": []}
 
 
@@ -59,7 +59,7 @@ def prefixes():
             r = c.api_call("config/query", method=1,
                            params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
             conf = r.get("data") or r.get("result") or {}
-            _pref["pic"] = _first_line(conf.get("playLines")) or conf.get("picBaseUrl") or _pref["pic"]
+            _pref["pic"] = conf.get("picBaseUrl") or _first_line(conf.get("playLines")) or _pref["pic"]
             # 视频线路（国线/海线，h5_play_line），按 line 去重
             hl = json.loads(conf.get("h5_play_line") or "[]")
             seen, lines = set(), []
