@@ -53,13 +53,43 @@ def _first_line(s):
         return None
 
 
+_pic_sample = {"p": None}     # 探测用的样本图 path（库里取一次）
+
+
+def _probe_pic(cands):
+    """真实公网(绕开 server 代理)逐条探测候选图片域名，选第一条能正常返回封面的；
+    自动筛掉 playLines 偶发的死线（如 qv1tx 解析到 fake-ip、对浏览器超时）。"""
+    if _pic_sample["p"] is None:
+        try:
+            r = db.query("SELECT vodPic FROM videos WHERE vodPic IS NOT NULL AND vodPic<>'' "
+                         "ORDER BY createTime DESC LIMIT 1")
+            _pic_sample["p"] = (r[0]["vodPic"] if r else "") or ""
+        except Exception:
+            _pic_sample["p"] = ""
+    for base in cands:
+        try:
+            resp = c.requests.get(c._join(base, _pic_sample["p"]), timeout=3,
+                                  proxies={"http": None, "https": None})   # 强制不走代理 = 公网视角
+            if resp.status_code == 200 and resp.content:
+                return base
+        except Exception:
+            continue
+    return cands[0] if cands else None
+
+
 def prefixes():
     if time.time() - _pref["t"] > 120:
         try:
             r = c.api_call("config/query", method=1,
                            params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
             conf = r.get("data") or r.get("result") or {}
-            _pref["pic"] = conf.get("picBaseUrl") or _first_line(conf.get("playLines")) or _pref["pic"]
+            # 图片基址：picBaseUrl + playLines 全部候选，真实公网探测选第一条能取到封面的
+            cands = [conf["picBaseUrl"]] if conf.get("picBaseUrl") else []
+            for x in json.loads(conf.get("playLines") or "[]"):
+                ln = x.get("line")
+                if ln and ln not in cands:
+                    cands.append(ln)
+            _pref["pic"] = _probe_pic(cands) or _pref["pic"]
             # 视频线路（国线/海线，h5_play_line），按 line 去重
             hl = json.loads(conf.get("h5_play_line") or "[]")
             seen, lines = set(), []
