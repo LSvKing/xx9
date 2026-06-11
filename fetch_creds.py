@@ -186,11 +186,18 @@ def fetch_cdn_prefixes(api_base, access_token, jwt_token, origin, keys) -> dict:
 # ============================================================
 # Playwright 抓取
 # ============================================================
-async def capture(url: str, headful: bool, keys: list) -> dict:
+async def capture(url: str, headful: bool, keys: list, dump: bool = False) -> dict:
     from playwright.async_api import async_playwright
 
     captured = {"api_base": None, "access_token": None, "jwt_token": None,
                 "origin": None, "final_url": None}
+
+    def _decode(b64: str, ts: int) -> str:
+        """用轮换 keys 解密接口 body（请求/响应同构：{data, time}）"""
+        try:
+            return unpad(AES.new(keys[ts % 10].encode(), AES.MODE_ECB).decrypt(base64.b64decode(b64)), 16).decode("utf-8", "replace")
+        except Exception as e:
+            return f"(解不开: {e})"
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=not headful, args=["--ignore-certificate-errors"])
@@ -208,17 +215,28 @@ async def capture(url: str, headful: bool, keys: list) -> dict:
                 v = req.headers.get(h)
                 if v and not captured[k]:
                     captured[k] = v
+            if dump:                                  # --dump-api：解出请求 body 看 uri/params
+                try:
+                    body = json.loads(req.post_data or "{}")
+                    plain = _decode(body["data"], int(body.get("time", 0))) if "data" in body else req.post_data
+                    print(f"\n[REQ] {req.method} {req.url}\n      acc={req.headers.get('accesstoken','')[:12]} jwt={'有' if req.headers.get('jwttoken') else '无'}\n      body={plain}")
+                except Exception as e:
+                    print(f"[REQ] {req.url}  (body 读取失败: {e})")
 
     # access_token 不在前几个请求里（要等 user/register/free 之后才带）；
     # 直接从接口响应里解出 accessToken，最早、最可靠
     def on_response(resp):
-        if "fast-endecode" not in resp.url or captured["access_token"]:
+        if "fast-endecode" not in resp.url:
+            return
+        if captured["access_token"] and not dump:
             return
         async def grab():
             try:
                 j = await resp.json()
                 t = int(j.get("time", 0))
                 raw = unpad(AES.new(keys[t % 10].encode(), AES.MODE_ECB).decrypt(base64.b64decode(j["data"])), 16)
+                if dump:
+                    print(f"[RESP] {resp.url}\n       {raw.decode('utf-8','replace')[:400]}")
                 m = re.search(rb'"accessToken"\s*:\s*"([^"]+)"', raw)
                 if m and not captured["access_token"]:
                     captured["access_token"] = m.group(1).decode()
@@ -251,6 +269,7 @@ def main():
     ap.add_argument("--headful", action="store_true", help="显示浏览器窗口")
     ap.add_argument("--sync-config", action="store_true", help="抓取后写回 config.json")
     ap.add_argument("--show", action="store_true", help="只打印库里最新一条，不抓取")
+    ap.add_argument("--dump-api", action="store_true", help="调试：打印每个接口的 URI + 解密 body/响应（找注册接口用）")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -269,7 +288,7 @@ def main():
         return
 
     print(f"打开 {args.url} 抓取域名/token ...")
-    cap = asyncio.run(capture(args.url, args.headful, get_keys(cfg)))
+    cap = asyncio.run(capture(args.url, args.headful, get_keys(cfg), dump=args.dump_api))
 
     if not cap["api_base"] or not cap["jwt_token"]:   # access_token 现已可选，只要这俩
         print("未捕获到 API 域名/jwt_token，可能原因:")
