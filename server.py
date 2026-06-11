@@ -11,6 +11,7 @@
 import os
 import json
 import time
+import threading
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends
@@ -75,33 +76,70 @@ def prefixes():
     return _pref
 
 
-# 播放签名地址缓存：vid -> (addr, t)。签名约 1 小时有效，30 分钟内复用，
-# 既减少"暂时无法播放"（少打抽风的实时接口），重开/秒切也更快。
+# 播放签名地址缓存：vid -> (addr, t)。签名约 1 小时有效。
+#   <TTL(30min)：直接复用，不打接口；重开/秒切更快、也少打抽风的实时接口。
+#   <STALE(55min)：实时取址失败时，旧地址还没过签名期 → 拿来兜底，别让用户吃"暂时无法播放"。
 _play_cache = {}
 _PLAY_TTL = 1800
+_PLAY_STALE = 3300
+_play_lock = threading.Lock()        # 保护 cache + inflight
+_play_inflight = {}                  # vid -> Event：同一 vid 并发只打一次接口，其余等结果
+
+
+def _detail_addr(vid: int, use_proxy):
+    """打一次 detail 接口，取第一条有 addr 的播放线路。失败抛异常。"""
+    d = c.api_call(f"cms/vod/detail/{vid}", method=1, timeout=12, use_proxy=use_proxy)
+    play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
+    if isinstance(play, str):
+        play = [{"addr": play}]
+    return next((p.get("addr") for p in play if p.get("addr")), None)
+
+
+def _fetch_addr(vid: int):
+    """实时取址，最多 3 次：第 1 次走本机真实 IP（快、独享）；失败后第 2/3 次换住宅
+    代理 IP（绕开被 WAF 限速的本机 IP）。每次之间小退避，给瞬时网络抖动恢复时间。"""
+    for attempt in range(3):
+        try:
+            addr = _detail_addr(vid, use_proxy=(attempt >= 1))
+            if addr:
+                return addr
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(0.4)
+    return None
 
 
 def _fresh_addr(vid: int):
-    """实时取带签名的 m3u8 地址。命中缓存直接用；否则调 detail 接口，
-    代理/WAF 抽风时重试几次（_PROXY 每次轮换 IP，多试基本能成）。"""
+    now_t = time.time()
     hit = _play_cache.get(vid)
-    if hit and time.time() - hit[1] < _PLAY_TTL:
-        return hit[0]
-    addr = None
-    for _ in range(3):   # 短超时 + 重试；走本机真实 IP（不走代理，独享、不跟回填抢被限速的住宅 IP）
-        try:
-            d = c.api_call(f"cms/vod/detail/{vid}", method=1, timeout=12, use_proxy=False)
-            play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
-            if isinstance(play, str):
-                play = [{"addr": play}]
-            addr = next((p.get("addr") for p in play if p.get("addr")), None)
-            if addr:
-                break
-        except Exception:
-            pass
-    if addr:
-        _play_cache[vid] = (addr, time.time())
-    return addr
+    if hit and now_t - hit[1] < _PLAY_TTL:
+        return hit[0]                                    # 新鲜缓存，直接用
+
+    # single-flight：同一 vid 并发只让一个去打接口，其余等它的结果
+    with _play_lock:
+        ev = _play_inflight.get(vid)
+        leader = ev is None
+        if leader:
+            ev = threading.Event()
+            _play_inflight[vid] = ev
+    if not leader:
+        ev.wait(timeout=15)
+        h = _play_cache.get(vid)
+        return h[0] if h else None
+
+    try:
+        addr = _fetch_addr(vid)
+        if addr:
+            _play_cache[vid] = (addr, time.time())
+            return addr
+        if hit and now_t - hit[1] < _PLAY_STALE:         # 取址失败 → 旧地址没过签名期就兜底
+            return hit[0]
+        return None
+    finally:
+        with _play_lock:
+            _play_inflight.pop(vid, None)
+        ev.set()
 
 
 def pic_url(path):
