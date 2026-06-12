@@ -8,6 +8,7 @@ videos/
 .venv/
 uv.lock
 config.json
+logs/
 output/
 __pycache__/
 *.pyc

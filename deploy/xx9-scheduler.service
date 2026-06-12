@@ -1,0 +1,34 @@
+# xx9 计划任务调度器 —— systemd 服务单元（海外服务器）
+#
+# 安装：
+#   sudo cp deploy/xx9-scheduler.service /etc/systemd/system/
+#   # 按需改下面的 User / WorkingDirectory / ExecStart 路径
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now xx9-scheduler
+#
+# 看状态/日志：
+#   systemctl status xx9-scheduler
+#   journalctl -u xx9-scheduler -f          # 主日志（scheduler.log 同时也写到项目 logs/）
+#
+# 改了 config.json 的 scheduler 段后重启生效：
+#   sudo systemctl restart xx9-scheduler
+
+[Unit]
+Description=xx9 scheduler (qingguo IP / creds / crawler refresh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/xx9
+# uv 会用项目 .venv 里的解释器（已含 apscheduler/pymysql/requests）
+ExecStart=/usr/local/bin/uv run python scheduler.py
+Restart=on-failure
+RestartSec=10
+# 优雅退出：给在跑的任务（如 crawler --refresh）收尾时间
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

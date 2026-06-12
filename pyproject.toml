@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "itsdangerous>=2.1",
+    "apscheduler>=3.10",
 ]
 
 # 国内镜像（清华），加速 uv sync / 依赖安装
