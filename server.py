@@ -42,7 +42,7 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET, max_age=30 * 24 * 3600)
 
 # ---- CDN 前缀（每 2 分钟实时从 config/query 拉，跟随域名轮换）----
 # 图片优先 picBaseUrl（更稳）；playLines 偶尔会轮换出对浏览器不可用的死线（如 qv1tx 解析到 fake-ip 超时），故仅作兜底。视频 m3u8 用 h5_play_line（国线/海线，可切换）。
-_pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE, "lines": []}
+_pref = {"t": 0.0, "media": c.MEDIA_BASE, "pic": c.PIC_BASE, "lines": [], "cands": []}
 
 
 def _first_line(s):
@@ -74,22 +74,23 @@ def _probe_pic(cands):
                 return base
         except Exception:
             continue
-    return cands[0] if cands else None
+    return None     # 候选全死：返回 None，调用方保留原值，不硬切到死 base
 
 
 def prefixes():
     if time.time() - _pref["t"] > 120:
+        cands = None
         try:
             r = c.api_call("config/query", method=1,
                            params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
             conf = r.get("data") or r.get("result") or {}
-            # 图片基址：picBaseUrl + playLines 全部候选，真实公网探测选第一条能取到封面的
+            # 图片基址候选：picBaseUrl + playLines 全部
             cands = [conf["picBaseUrl"]] if conf.get("picBaseUrl") else []
             for x in json.loads(conf.get("playLines") or "[]"):
                 ln = x.get("line")
                 if ln and ln not in cands:
                     cands.append(ln)
-            _pref["pic"] = _probe_pic(cands) or _pref["pic"]
+            _pref["cands"] = cands        # 记下本次候选，接口挂时离线复探用
             # 视频线路（国线/海线，h5_play_line），按 line 去重
             hl = json.loads(conf.get("h5_play_line") or "[]")
             seen, lines = set(), []
@@ -101,7 +102,14 @@ def prefixes():
                 _pref["lines"] = lines
                 _pref["media"] = lines[0]["line"]
         except Exception:
-            pass
+            # 接口挂了：用上次成功记下的候选列表离线复探，别硬用一个可能已死的旧 base
+            cands = list(_pref.get("cands") or [])
+        # 无论接口通不通，都对手上的候选做公网验活、选第一条活的；
+        # 把当前值和 config 兜底也并进去做候选，全死时 _probe_pic 返回 None → 保留原值
+        for extra in (_pref["pic"], c.PIC_BASE):
+            if extra and extra not in cands:
+                cands.append(extra)
+        _pref["pic"] = _probe_pic(cands) or _pref["pic"]
         _pref["t"] = time.time()
     return _pref
 
