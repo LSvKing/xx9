@@ -21,9 +21,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/xx9
+WorkingDirectory=/data/xx9
+# systemd 不读 shell PATH，uv 必须写绝对路径（which uv 查；这里是 root 装的默认位置）
+Environment=HOME=/root
 # uv 会用项目 .venv 里的解释器（已含 apscheduler/pymysql/requests）
-ExecStart=/usr/local/bin/uv run python scheduler.py
+ExecStart=/root/.local/bin/uv run python scheduler.py
 Restart=on-failure
 RestartSec=10
 # 优雅退出：给在跑的任务（如 crawler --refresh）收尾时间
