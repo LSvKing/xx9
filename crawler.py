@@ -493,7 +493,7 @@ class DB:
             item.get("gif"), item.get("preview"),
             a.get("nickName"), a.get("id"), a.get("avatar"), a.get("fansNum"),
             item.get("readNumber"), item.get("likeNumber"), item.get("comments"),
-            json.dumps(item.get("tags"), ensure_ascii=False),
+            json.dumps(item.get("tags") if isinstance(item.get("tags"), list) else [], ensure_ascii=False),
             json.dumps(item.get("groups")), json.dumps(item.get("themes")),
             item.get("createTime"), item.get("vodTime"), _now_iso(),
         )
