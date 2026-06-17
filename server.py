@@ -450,5 +450,15 @@ def themes_dict(_=Depends(require_auth)):
 # 下载改由浏览器直连 CDN 完成（拉分片 + AES 解密 + 拼 .ts），不经后端，见 web/app.js
 
 
+@app.middleware("http")
+async def _revalidate_static(request, call_next):
+    """静态资源(非 /api)统一 no-cache：浏览器每次带 ETag 复验，文件改了立刻生效、
+    没改返回 304。根治手机端缓存旧 app.js/style.css 看不到更新的问题。"""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # ---- 静态前端（必须最后挂，让 /api 路由优先）----
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
