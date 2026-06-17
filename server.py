@@ -241,6 +241,7 @@ async def logout(request: Request):
 # 列表 / 搜索 / 筛选 / 排序 / 翻页
 # ============================================================
 _SORT = {"new": "v.createTime DESC", "hot": "v.readNumber DESC", "long": "v.duration DESC"}
+SHORT_MAX_SEC = 300        # 短视频阈值：时长 < 此秒数算短视频（5 分钟），按库里分布可调
 
 
 @app.get("/api/videos")
@@ -269,6 +270,10 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, theme: int = 0, sort
     else:
         frm = "videos v"
         order = _SORT.get(sort, _SORT["new"])
+        if source == "short":                       # 短视频：时长 < 阈值（秒）
+            where.append("v.duration > 0 AND v.duration < %s"); params.append(SHORT_MAX_SEC)
+        else:                                        # 全部/主题/分类/搜索：剔除已知短视频（时长未知的保留）
+            where.append("NOT (v.duration > 0 AND v.duration < %s)"); params.append(SHORT_MAX_SEC)
 
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = (f"SELECT v.id, v.title, v.vodPic, v.duration, v.author, v.authorAvatar, "
@@ -391,6 +396,9 @@ def home(_=Depends(require_auth)):
             for r in rows:
                 if r["id"] in used:
                     continue
+                d = r.get("duration") or 0
+                if 0 < d < SHORT_MAX_SEC:           # 短视频不进普通专题，只在「短视频」块出现
+                    continue
                 try:
                     ts = json.loads(r.get("themes") or "[]")
                 except Exception:
@@ -414,6 +422,17 @@ def home(_=Depends(require_auth)):
             # 视频太少的专题不单独成块；视频多的专题排前面
             out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
                          key=lambda b: len(b["items"]), reverse=True)
+            # 「短视频」专题块：时长 < 阈值，取最新 12 条；source=short 标记让前端点标题跳到短视频网格
+            short_rows = db.query(
+                "SELECT id, title, vodPic, duration, author, readNumber, createTime "
+                "FROM videos WHERE duration > 0 AND duration < %s "
+                "ORDER BY createTime DESC LIMIT 12", (SHORT_MAX_SEC,))
+            if len(short_rows) >= 4:
+                out = [{"id": "short", "title": "短视频", "source": "short", "items": [{
+                    "id": r["id"], "title": r["title"], "cover": pic_url(r["vodPic"]),
+                    "duration": r["duration"], "author": r["author"],
+                    "readNumber": r["readNumber"], "createTime": r["createTime"],
+                } for r in short_rows]}] + out
             if out:
                 _home["data"] = out
                 _home["t"] = time.time()

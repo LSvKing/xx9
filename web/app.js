@@ -44,7 +44,7 @@ $('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }
 // ---------- 列表 ----------
 const fmtDur = (s) => { s = s || 0; const m = Math.floor(s / 60), x = s % 60; return `${m}:${String(x).padStart(2, '0')}`; };
 const fmtNum = (n) => n >= 10000 ? (n / 10000).toFixed(1) + 'w' : (n || 0);
-const fmtDate = (ms) => { if (!ms) return ''; const d = new Date(+ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const fmtDate = (ms) => { if (!ms) return ''; const d = new Date(+ms); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 
 function reset() { state.page = 1; state.end = false; $('#grid').innerHTML = ''; load(); }
 
@@ -68,9 +68,12 @@ async function load() {
   state.loading = false;
 }
 
+const SHORT_MAX = 300;     // 短视频阈值（秒），与后端 server.py SHORT_MAX_SEC 保持一致
+const isShort = (v) => v && v.duration > 0 && v.duration < SHORT_MAX;
+
 function card(v) {
   const el = document.createElement('div');
-  el.className = 'card';
+  el.className = isShort(v) ? 'card short' : 'card';   // 短视频卡片竖版
   el.innerHTML = `
     <div class="thumb">
       <img class="cover" data-cover="${v.cover}">
@@ -166,7 +169,9 @@ async function renderHome() {
       const sec = document.createElement('div');
       sec.className = 'theme';
       sec.innerHTML = `<h3>${esc(t.title || '')} ›</h3><div class="row"></div>`;
-      sec.querySelector('h3').onclick = () => setHash({ source: 'all', theme: t.id, q: '', g: 0, v: null });
+      sec.querySelector('h3').onclick = () => t.source
+        ? setHash({ source: t.source, theme: null, q: '', g: 0, v: null })   // 短视频块 → 短视频网格
+        : setHash({ source: 'all', theme: t.id, q: '', g: 0, v: null });
       const row = sec.querySelector('.row');
       for (const v of t.items) row.appendChild(card(v));
       home.appendChild(sec);
@@ -284,6 +289,7 @@ async function _openPlayer(id) {
   if (r.aborted) return;
   if (r.gone) { curId = null; closePlayer(); alert('该视频暂不可用，可能已下架'); return; }
   const v = r.v;
+  document.querySelector('.player-box').classList.toggle('short', isShort(v));   // 短视频竖版播放窗口
   $('#p-title').textContent = v.title || '';
   $('#p-stats').textContent = `▶ ${fmtNum(v.readNumber)}  ♥ ${fmtNum(v.likeNumber)}  ·  ${fmtDate(v.createTime)}`;
   $('#p-tags').innerHTML = (v.tags || []).map(t => `<span>${esc(t)}</span>`).join('');
