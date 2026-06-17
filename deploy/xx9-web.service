@@ -1,0 +1,35 @@
+# xx9 web 前端/接口（FastAPI + uvicorn）—— systemd 服务单元
+#
+# 安装：
+#   sudo cp deploy/xx9-web.service /etc/systemd/system/
+#   # 按需改下面的 WorkingDirectory / ExecStart 路径与端口
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now xx9-web
+#
+# 看状态/日志：
+#   systemctl status xx9-web
+#   journalctl -u xx9-web -f
+#
+# 改了 server.py / 前端后重启生效（前端是静态文件，git pull 即可，无需重启）：
+#   sudo systemctl restart xx9-web
+
+[Unit]
+Description=xx9 web (FastAPI server.py via uvicorn :8000)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/xx9
+# systemd 不读 shell PATH，uv 必须写绝对路径（which uv 查；这里是 root 装的默认位置）
+Environment=HOME=/root
+# uv 会用项目 .venv 里的解释器（已含 fastapi/uvicorn/pymysql/requests）
+ExecStart=/root/.local/bin/uv run uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
