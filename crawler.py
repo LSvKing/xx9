@@ -202,6 +202,38 @@ else:
     CREDS_SOURCE = "config.json（DB 无凭证，已回退）"
 
 
+_last_reload = [0.0]
+_RELOAD_COOLDOWN = 30          # 秒：并发请求里只让一个真去读库重载，避免风暴
+
+
+def reload_creds() -> bool:
+    """重新从 MySQL credentials 表读最新凭证，刷新模块级 API_BASE/token 等全局。
+    长驻进程（server.py）或批量爬取中途遇到 JWT 过期时调用，无需重启即可跟上
+    fetch_creds.py 的刷新。读到库里凭证返回 True，否则保持原值返回 False。"""
+    global API_BASE, FRONTEND, MEDIA_BASE, PIC_BASE, MP4_BASE
+    global ACCESS_TOKEN, JWT_TOKEN, CREDS_SOURCE
+    cr = _load_creds_from_db(MYSQL)
+    if cr and cr.get("api_base"):
+        API_BASE = cr["api_base"] or API_BASE
+        FRONTEND = cr["frontend"] or FRONTEND
+        MEDIA_BASE = cr.get("media_base") or MEDIA_BASE
+        PIC_BASE = cr.get("pic_base") or PIC_BASE
+        MP4_BASE = cr.get("mp4_base") or MP4_BASE
+        ACCESS_TOKEN = cr["access_token"] or ACCESS_TOKEN
+        JWT_TOKEN = cr["jwt_token"] or JWT_TOKEN
+        CREDS_SOURCE = "MySQL credentials 表 @ " + str(cr.get("captured_at", ""))[:19]
+        return True
+    return False
+
+
+def _maybe_reload_creds() -> bool:
+    """带冷却的凭证重载：距上次重载不足冷却期就不重复读库（并发去重）。"""
+    if time.time() - _last_reload[0] < _RELOAD_COOLDOWN:
+        return False
+    _last_reload[0] = time.time()
+    return reload_creds()
+
+
 class _ProxyPool:
     """青果住宅代理池：query 拿当前在用 IP 并轮换；不足目标数就 get 补满
     （IP 逐个到期会让池子 3→2→1 缩水，只剩一个时还硬扛会触发 WAF per-IP 限速，
@@ -285,10 +317,12 @@ def aes_dec_auto(b64: str, hint: int = None) -> bytes:
 
 
 def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
-             use_proxy: bool = None) -> dict:
+             use_proxy: bool = None, _retried: bool = False) -> dict:
     """use_proxy: None=跟随全局 USE_PROXY；True/False=本次强制。
     高频回填走代理轮换绕 WAF；低频的播放取地址传 False 走本机真实 IP，
-    独享、不跟回填挤在同一个被限速的住宅 IP 上。"""
+    独享、不跟回填挤在同一个被限速的住宅 IP 上。
+    解出 code 1034（JwtToken 过期）时自动热重载凭证并重试一次——server.py 长驻
+    进程、批量爬取中途都能据此自愈，不必重启/不必等下一轮 fetch_creds。"""
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
     bp = json.dumps({"method": method, "params": params or {}, "uri": uri}, separators=(",", ":"))
@@ -308,7 +342,11 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     data = resp.json()
     if "data" not in data or "time" not in data:
         return data
-    return json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
+    res = json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
+    if (not _retried and isinstance(res, dict) and res.get("code") == 1034
+            and _maybe_reload_creds()):
+        return api_call(uri, method, params, timeout, use_proxy, _retried=True)
+    return res
 
 
 def _join(base: str, path: str) -> str:

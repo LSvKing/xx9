@@ -180,7 +180,22 @@ let hls = null;
 const video = $('#video');
 let curId = null;
 let lineList = [], playOrder = [], slot = 0;
+let autoTried = new Set();                                 // 本次播放已自动试过的线路下标，避免循环
 const isOversea = (n) => /海/.test(n || '');               // 海线判定（排在国线后）
+
+function autoNextLine() {                                  // 当前线连不上 → 自动切下一条没试过的线，保留进度
+  const curIdx = +$('#line-sel').value;
+  autoTried.add(curIdx);
+  for (let s = slot + 1; s < playOrder.length; s++) {
+    const idx = playOrder[s];
+    if (autoTried.has(idx)) continue;
+    slot = s;
+    toast(`「${lineList[curIdx].name}」连不上，自动切「${lineList[idx].name}」`);
+    playLine(idx, true);
+    return true;
+  }
+  return false;
+}
 
 function toast(msg, ms) {
   let t = $('#toast');
@@ -294,8 +309,9 @@ async function _openPlayer(id) {
   playOrder = guo.concat(hai);                             // 国线在前、海线在后；缺哪类就用现有的
   sel.innerHTML = playOrder.map(i => `<option value="${i}">${esc(lines[i].name)}</option>`).join('');
   sel.style.display = playOrder.length > 1 ? '' : 'none';
-  sel.onchange = () => { slot = Math.max(0, playOrder.indexOf(+sel.value)); playLine(+sel.value, true); };
+  sel.onchange = () => { autoTried = new Set(); slot = Math.max(0, playOrder.indexOf(+sel.value)); playLine(+sel.value, true); };
 
+  autoTried = new Set();
   slot = 0;
   playLine(playOrder[0], false);
   api('/api/history/' + id, { method: 'POST' });   // 记历史
@@ -311,7 +327,8 @@ function playSource(src) {
     hls.on(Hls.Events.ERROR, (e, d) => {
       if (!d.fatal) return;
       if (d.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch (_) {} }
-      toast('该线路连不上，点「⚡测速选线」换一条');   // 不自动切，提示用户
+      // 网络类致命错误（线路死/403/超时）→ 自动切下一条线；全部试完才报失败
+      if (!autoNextLine()) toast('所有线路都连不上，可能已下架或稍后再试');
     });
     hls.loadSource(src);
     hls.attachMedia(video);
