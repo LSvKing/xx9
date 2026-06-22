@@ -79,6 +79,12 @@ def _probe_pic(cands):
 
 def prefixes():
     if time.time() - _pref["t"] > 120:
+        # 长驻进程主动跟上 fetch_creds 写进 DB 的新凭证：每个刷新周期先从 MySQL 重读一次，
+        # 别干等源站回 code 1034 才被动重载（旧逻辑下 JWT 一坏没回 1034 就一直用启动时的旧凭证）。
+        try:
+            c.reload_creds()
+        except Exception:
+            pass
         cands = None
         try:
             r = c.api_call("config/query", method=1,
