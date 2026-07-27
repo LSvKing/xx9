@@ -15,22 +15,41 @@ const io = new IntersectionObserver((entries) => {
   }
 }, { rootMargin: '400px' });
 
+// 解出来的字节按魔数认类型：blob: 的 <img> 认 Blob 的 type，写死一种会挑食
+function sniffMime(b) {
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  return 'image/jpeg';
+}
+
 async function loadCover(img, url, vid) {
   if (!url && !vid) return;
-  // 优先走后端解密代理：海阔/浏览器都可直接 <img src>
-  if (vid) {
+  // 兜底：后端解密代理（图片域名刚轮换时它会强制重探活域名，自愈比前端快）
+  const proxy = () => {
+    if (!vid) { img.style.opacity = 0.2; return; }
     img.src = '/api/cover/' + vid;
     img.onerror = () => { img.style.opacity = 0.2; };
-    return;
-  }
-  if (!url) return;
-  if (imgSecret !== '1') { img.src = url; return; }
+  };
+  if (!url) return proxy();
+  if (imgSecret !== '1') { img.src = url; img.onerror = proxy; return; }
+  // 默认直连 CDN 自己解：封面平均 240KB，走后端代理要多绕一趟 VPS，而且和 /api 同源
+  // 抢那 6 条并发，滚长列表时排队很明显。CDN 是独立源、CORS 全开，能吃满并发。
   try {
-    const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const r = await fetch(url);
+    if (!r.ok) return proxy();                          // 域名刚轮换会回错误页，fetch 本身不抛
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (buf.length < 2) return proxy();
     const k = buf[0];
     for (let i = 1; i < buf.length; i++) buf[i] ^= k;   // 每字节 XOR 首字节
-    img.src = URL.createObjectURL(new Blob([buf.slice(1)], { type: 'image/jpeg' }));  // 丢首字节
-  } catch (e) { img.style.opacity = 0.2; }
+    const body = buf.subarray(1);                       // 丢首字节
+    const u = URL.createObjectURL(new Blob([body], { type: sniffMime(body) }));
+    img.onload = () => URL.revokeObjectURL(u);          // 滚长列表别把 blob 全囤着
+    img.onerror = () => { URL.revokeObjectURL(u); proxy(); };   // 解出来不是图 → 退回代理
+    img.src = u;
+  } catch (e) { proxy(); }
 }
 
 // ---------- 登录 ----------
