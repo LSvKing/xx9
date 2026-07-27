@@ -12,10 +12,13 @@ import os
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from starlette.middleware.sessions import SessionMiddleware
 
 import crawler as c
@@ -36,8 +39,51 @@ db.execute("""CREATE TABLE IF NOT EXISTS history (
     video_id BIGINT PRIMARY KEY, watched_at VARCHAR(32), position INT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
 
-app = FastAPI(title="xx9")
+@asynccontextmanager
+async def _lifespan(_app):
+    """启动即在后台把上游相关的缓存跑热（CDN 前缀/图片加密位/分类/首页），
+    别让重启后第一个用户在请求里同步等 config/query + 域名探测（实测 ~7s）。"""
+    threading.Thread(target=_prewarm, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="xx9", lifespan=_lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SECRET, max_age=30 * 24 * 3600)
+
+
+# ---- 后台刷新（stale-while-revalidate）----
+# 缓存过期时先把旧值返回给请求，刷新丢后台线程做。刷新触发时刻和原来完全一样，
+# 只是触发的那一波请求不再同步干等上游；single-flight 顺带修掉「过期瞬间 N 个并发
+# 各跑一遍探测」的惊群。
+_swr_lock = threading.Lock()
+_swr_running: set = set()
+
+
+def _swr(key, fn):
+    with _swr_lock:
+        if key in _swr_running:
+            return
+        _swr_running.add(key)
+
+    def run():
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            with _swr_lock:
+                _swr_running.discard(key)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _prewarm():
+    # 顺序有讲究：先 prefixes 定下图片域名，_refresh_home 才能拼出对的封面地址
+    for fn in (_refresh_prefixes, _refresh_img_secret, _refresh_groups, _refresh_home):
+        try:
+            fn()
+        except Exception:
+            pass
 
 
 # ---- CDN 前缀（每 2 分钟实时从 config/query 拉，跟随域名轮换）----
@@ -56,9 +102,22 @@ def _first_line(s):
 _pic_sample = {"p": None}     # 探测用的样本图 path（库里取一次）
 
 
+def _pic_alive(base):
+    try:
+        resp = c.requests.get(c._join(base, _pic_sample["p"]), timeout=3,
+                              proxies={"http": None, "https": None})   # 强制不走代理 = 公网视角
+        return resp.status_code == 200 and bool(resp.content)
+    except Exception:
+        return False
+
+
 def _probe_pic(cands):
-    """真实公网(绕开 server 代理)逐条探测候选图片域名，选第一条能正常返回封面的；
-    自动筛掉 playLines 偶发的死线（如 qv1tx 解析到 fake-ip、对浏览器超时）。"""
+    """真实公网(绕开 server 代理)探测候选图片域名，选第一条能正常返回封面的；
+    自动筛掉 playLines 偶发的死线（如 qv1tx 解析到 fake-ip、对浏览器超时）。
+    并发探测再按原优先级挑活的：串行时每条死线要吃满 3s 超时，4 条候选最坏 12s。"""
+    cands = [x for x in cands if x]
+    if not cands:
+        return None
     if _pic_sample["p"] is None:
         try:
             r = db.query("SELECT vodPic FROM videos WHERE vodPic IS NOT NULL AND vodPic<>'' "
@@ -66,58 +125,85 @@ def _probe_pic(cands):
             _pic_sample["p"] = (r[0]["vodPic"] if r else "") or ""
         except Exception:
             _pic_sample["p"] = ""
-    for base in cands:
-        try:
-            resp = c.requests.get(c._join(base, _pic_sample["p"]), timeout=3,
-                                  proxies={"http": None, "https": None})   # 强制不走代理 = 公网视角
-            if resp.status_code == 200 and resp.content:
-                return base
-        except Exception:
-            continue
+    with ThreadPoolExecutor(max_workers=min(8, len(cands))) as ex:
+        alive = list(ex.map(_pic_alive, cands))
+    for base, ok in zip(cands, alive):
+        if ok:
+            return base
     return None     # 候选全死：返回 None，调用方保留原值，不硬切到死 base
 
 
+def _refresh_prefixes():
+    """重活：上游 config/query + 公网探测图片域名（实测合计 ~3.5s）。
+    由后台 SWR 线程或错误驱动的强制自愈调用，正常请求不会同步跑到这里。"""
+    cands = None
+    try:
+        r = c.api_call("config/query", method=1,
+                       params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
+        conf = r.get("data") or r.get("result") or {}
+        # 图片基址候选：picBaseUrl + playLines 全部
+        cands = [conf["picBaseUrl"]] if conf.get("picBaseUrl") else []
+        for x in json.loads(conf.get("playLines") or "[]"):
+            ln = x.get("line")
+            if ln and ln not in cands:
+                cands.append(ln)
+        _pref["cands"] = cands        # 记下本次候选，接口挂时离线复探用
+        # 视频线路（国线/海线，h5_play_line），按 line 去重
+        hl = json.loads(conf.get("h5_play_line") or "[]")
+        seen, lines = set(), []
+        for x in hl:
+            ln = x.get("line")
+            if ln and ln not in seen:
+                seen.add(ln); lines.append({"name": x.get("name") or ln, "line": ln})
+        if lines:
+            _pref["lines"] = lines
+            _pref["media"] = lines[0]["line"]
+    except Exception:
+        # 接口挂了：用上次成功记下的候选列表离线复探，别硬用一个可能已死的旧 base
+        cands = list(_pref.get("cands") or [])
+    # 无论接口通不通，都对手上的候选做公网验活、选第一条活的；
+    # 把当前值和 config 兜底也并进去做候选，全死时 _probe_pic 返回 None → 保留原值
+    for extra in (_pref["pic"], c.PIC_BASE):
+        if extra and extra not in cands:
+            cands.append(extra)
+    _pref["pic"] = _probe_pic(cands) or _pref["pic"]
+    _pref["t"] = time.time()
+    return _pref
+
+
+# 凭证重载有自己的计时器：它是纯读库（实测 0.19s），留在请求前台跑，
+# 保证 fetch_creds.py 写进 DB 的新 JWT 最多 120s 内被长驻进程接上。
+_creds_t = [0.0]
+_force_lock = threading.Lock()
+_force_t = [0.0]
+
+
 def prefixes():
-    if time.time() - _pref["t"] > 120:
-        # 长驻进程主动跟上 fetch_creds 写进 DB 的新凭证：每个刷新周期先从 MySQL 重读一次，
-        # 别干等源站回 code 1034 才被动重载（旧逻辑下 JWT 一坏没回 1034 就一直用启动时的旧凭证）。
+    if time.time() - _creds_t[0] > 120:
+        _creds_t[0] = time.time()
         try:
             c.reload_creds()
         except Exception:
             pass
-        cands = None
-        try:
-            r = c.api_call("config/query", method=1,
-                           params={"groupKey": "APP", "key": "picBaseUrl,playLines,h5_play_line"})
-            conf = r.get("data") or r.get("result") or {}
-            # 图片基址候选：picBaseUrl + playLines 全部
-            cands = [conf["picBaseUrl"]] if conf.get("picBaseUrl") else []
-            for x in json.loads(conf.get("playLines") or "[]"):
-                ln = x.get("line")
-                if ln and ln not in cands:
-                    cands.append(ln)
-            _pref["cands"] = cands        # 记下本次候选，接口挂时离线复探用
-            # 视频线路（国线/海线，h5_play_line），按 line 去重
-            hl = json.loads(conf.get("h5_play_line") or "[]")
-            seen, lines = set(), []
-            for x in hl:
-                ln = x.get("line")
-                if ln and ln not in seen:
-                    seen.add(ln); lines.append({"name": x.get("name") or ln, "line": ln})
-            if lines:
-                _pref["lines"] = lines
-                _pref["media"] = lines[0]["line"]
-        except Exception:
-            # 接口挂了：用上次成功记下的候选列表离线复探，别硬用一个可能已死的旧 base
-            cands = list(_pref.get("cands") or [])
-        # 无论接口通不通，都对手上的候选做公网验活、选第一条活的；
-        # 把当前值和 config 兜底也并进去做候选，全死时 _probe_pic 返回 None → 保留原值
-        for extra in (_pref["pic"], c.PIC_BASE):
-            if extra and extra not in cands:
-                cands.append(extra)
-        _pref["pic"] = _probe_pic(cands) or _pref["pic"]
-        _pref["t"] = time.time()
+    if time.time() - _pref["t"] > 120:
+        _swr("prefixes", _refresh_prefixes)     # 过期先用旧值，刷新丢后台
     return _pref
+
+
+def force_prefixes():
+    """错误驱动自愈：封面/取址失败多半是图片或播放域名刚轮换/挂了 →
+    立刻同步重探换活域名，不用干等 120s 定时器（比原来的纯定时刷新更快自愈）。
+    30s 冷却 + 单闸门：一屏封面同时失败时只探一次，后到的等这次探完直接用新值。"""
+    with _force_lock:
+        if time.time() - _force_t[0] < 30:
+            return _pref
+        _force_t[0] = time.time()
+        try:
+            c.reload_creds()
+        except Exception:
+            pass
+        _creds_t[0] = time.time()
+        return _refresh_prefixes()
 
 
 # 播放签名地址缓存：vid -> (addr, t)。签名约 1 小时有效。
@@ -202,22 +288,53 @@ def now():
 _imgsec = {"t": 0.0, "v": "1"}
 
 
+def _refresh_img_secret():
+    try:
+        r = c.api_call("config/query", method=1,
+                       params={"groupKey": "APP", "key": "newH5ImageSecret"})
+        d = r.get("data") or r.get("result") or {}
+        _imgsec["v"] = str(d.get("newH5ImageSecret", "1"))
+    except Exception:
+        pass
+    _imgsec["t"] = time.time()
+
+
 def img_secret():
     if time.time() - _imgsec["t"] > 600:
-        try:
-            r = c.api_call("config/query", method=1,
-                           params={"groupKey": "APP", "key": "newH5ImageSecret"})
-            d = r.get("data") or r.get("result") or {}
-            _imgsec["v"] = str(d.get("newH5ImageSecret", "1"))
-        except Exception:
-            pass
-        _imgsec["t"] = time.time()
+        _swr("imgsec", _refresh_img_secret)     # 过期先用旧值，刷新丢后台（默认 "1" 本就是常态值）
     return _imgsec["v"]
 
 
 def require_auth(request: Request):
     if not request.session.get("auth"):
         raise HTTPException(401, "需要登录")
+
+
+def decrypt_cover_bytes(data: bytes) -> bytes:
+    """与 web/app.js 一致：newH5ImageSecret==1 时，首字节为 key，其余 XOR 后丢掉首字节。"""
+    if not data:
+        return data
+    if str(img_secret()) != "1" or len(data) < 2:
+        return data
+    k = data[0]
+    return bytes(b ^ k for b in data[1:])
+
+
+def _sniff_image_type(data: bytes) -> str:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+# 封面解密结果短缓存（vid -> (bytes, mime, t)），减轻重复拉 CDN
+_cover_cache: dict = {}
+_COVER_TTL = 3600
 
 
 # ============================================================
@@ -241,6 +358,61 @@ async def login(request: Request):
 async def logout(request: Request):
     request.session.clear()
     return {"ok": True}
+
+
+# ============================================================
+# 封面代理（服务端解密，给网页/海阔直接用 <img src>）
+# 不鉴权：只暴露已入库视频的封面，CDN 原图本就可被猜到；避免海阔 img 不带 cookie。
+# ============================================================
+def _fetch_cover(path: str) -> bytes:
+    resp = c.requests.get(
+        pic_url(path),
+        timeout=10,
+        proxies={"http": None, "https": None},
+        headers={"User-Agent": "Mozilla/5.0", "Referer": ""},
+    )
+    if resp.status_code != 200 or not resp.content:
+        raise RuntimeError(f"CDN {resp.status_code}")
+    return resp.content
+
+
+@app.get("/api/cover/{vid}")
+def cover_proxy(vid: int):
+    now_t = time.time()
+    hit = _cover_cache.get(vid)
+    if hit and now_t - hit[2] < _COVER_TTL:
+        return Response(
+            content=hit[0],
+            media_type=hit[1],
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    rows = db.query("SELECT vodPic FROM videos WHERE id=%s", (vid,))
+    if not rows or not (rows[0].get("vodPic") or "").strip():
+        raise HTTPException(404, "无封面")
+    path = rows[0]["vodPic"]
+    try:
+        raw = _fetch_cover(path)
+    except Exception:
+        # 图片域名可能刚轮换/挂了：强制重探活域名后再试一次，别把一屏封面全挂掉
+        force_prefixes()
+        try:
+            raw = _fetch_cover(path)
+        except Exception as e:
+            raise HTTPException(502, f"封面拉取失败: {e}") from e
+
+    out = decrypt_cover_bytes(raw)
+    mime = _sniff_image_type(out)
+    _cover_cache[vid] = (out, mime, now_t)
+    # 简单限大小，防内存涨
+    if len(_cover_cache) > 500:
+        for k in list(_cover_cache.keys())[:100]:
+            _cover_cache.pop(k, None)
+    return Response(
+        content=out,
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 # ============================================================
@@ -290,6 +462,7 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, theme: int = 0, sort
     items = [{
         "id": r["id"], "title": r["title"],
         "cover": pic_url(r["vodPic"]),
+        "cover_local": f"/api/cover/{r['id']}",  # 已解密，可直接当图片 URL
         "duration": r["duration"], "author": r["author"],
         "readNumber": r["readNumber"], "likeNumber": r["likeNumber"],
         "createTime": r["createTime"],
@@ -305,6 +478,10 @@ def video_detail(vid: int, _=Depends(require_auth)):
     v = rows[0]
     # 播放地址带时间签名会过期，必须实时从 API 取新鲜的（库里存的早过期 → 403）
     addr = _fresh_addr(vid)
+    if not addr:
+        # 三次实时取址全挂：多半是凭证过期或 API 域名轮换 → 强制重载凭证+重探，再试一次
+        force_prefixes()
+        addr = _fresh_addr(vid)
 
     # 同一签名地址套到各条线路（国线/海线），前端可切换
     pr = prefixes()
@@ -351,16 +528,22 @@ def record_history(vid: int, position: int = 0, _=Depends(require_auth)):
 _groups = {"t": 0.0, "data": []}
 
 
+def _refresh_groups():
+    try:
+        r = c.api_call("cms/group", method=1)
+        _groups["data"] = [{"id": g["id"], "name": g.get("groupName")}
+                           for g in (r.get("data") or [])]
+        _groups["t"] = time.time()
+    except Exception:
+        pass
+
+
 @app.get("/api/groups")
 def groups(_=Depends(require_auth)):
-    if time.time() - _groups["t"] > 3600 or not _groups["data"]:
-        try:
-            r = c.api_call("cms/group", method=1)
-            _groups["data"] = [{"id": g["id"], "name": g.get("groupName")}
-                               for g in (r.get("data") or [])]
-            _groups["t"] = time.time()
-        except Exception:
-            pass
+    if not _groups["data"]:
+        _refresh_groups()                       # 手上没数据：只能同步取一次
+    elif time.time() - _groups["t"] > 3600:
+        _swr("groups", _refresh_groups)
     return _groups["data"]
 
 
@@ -386,64 +569,77 @@ def theme_names() -> dict:
     return _theme_names["data"]
 
 
-@app.get("/api/home")
-def home(_=Depends(require_auth)):
+def _refresh_home():
     """首页专题墙：视频全部取自本地 videos 表，按 themes(专题id) 分组；
     专题名来自 theme/list 字典(24h缓存)。下架专题取不到名 → 跳过该块。"""
-    if time.time() - _home["t"] > 300 or not _home["data"]:
-        try:
-            names = theme_names()
-            rows = db.query(
-                "SELECT id, title, vodPic, duration, author, readNumber, likeNumber, "
-                "createTime, themes FROM videos "
-                "ORDER BY createTime DESC LIMIT 3000")
-            buckets = {}   # 专题id -> {id,title,items}；按 createTime 倒序填，每题留最新 12 条
-            used = set()   # 一个视频只进一个专题：避免「一片多标签」的最新视频霸占多个专题头部
-            for r in rows:
-                if r["id"] in used:
+    if not _pref["t"]:
+        # 冷启且预热线程还没跑到 prefixes：先把图片域名定下来。cover 字段(海阔直接拿去当
+        # 图片地址用的 CDN 原图)会被烤进 300s 缓存里，这里用错兜底域名会让海阔黑图 5 分钟。
+        _refresh_prefixes()
+    try:
+        names = theme_names()
+        rows = db.query(
+            "SELECT id, title, vodPic, duration, author, readNumber, likeNumber, "
+            "createTime, themes FROM videos "
+            "ORDER BY createTime DESC LIMIT 3000")
+        buckets = {}   # 专题id -> {id,title,items}；按 createTime 倒序填，每题留最新 12 条
+        used = set()   # 一个视频只进一个专题：避免「一片多标签」的最新视频霸占多个专题头部
+        for r in rows:
+            if r["id"] in used:
+                continue
+            d = r.get("duration") or 0
+            if 0 < d < SHORT_MAX_SEC:           # 短视频不进普通专题，只在「短视频」块出现
+                continue
+            try:
+                ts = json.loads(r.get("themes") or "[]")
+            except Exception:
+                ts = []
+            if not isinstance(ts, list):
+                ts = []
+            for tid in ts:
+                name = names.get(tid)
+                if not name:               # 下架/隐藏专题，无名 → 跳过
                     continue
-                d = r.get("duration") or 0
-                if 0 < d < SHORT_MAX_SEC:           # 短视频不进普通专题，只在「短视频」块出现
-                    continue
-                try:
-                    ts = json.loads(r.get("themes") or "[]")
-                except Exception:
-                    ts = []
-                if not isinstance(ts, list):
-                    ts = []
-                for tid in ts:
-                    name = names.get(tid)
-                    if not name:               # 下架/隐藏专题，无名 → 跳过
-                        continue
-                    b = buckets.setdefault(tid, {"id": tid, "title": name, "items": []})
-                    if len(b["items"]) < 12:    # 归入第一个未满的所属专题即停，自动均摊
-                        b["items"].append({
-                            "id": r["id"], "title": r["title"],
-                            "cover": pic_url(r["vodPic"]),
-                            "duration": r["duration"], "author": r["author"],
-                            "readNumber": r["readNumber"], "createTime": r["createTime"],
-                        })
-                        used.add(r["id"])
-                        break
-            # 视频太少的专题不单独成块；视频多的专题排前面
-            out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
-                         key=lambda b: len(b["items"]), reverse=True)
-            # 「短视频」专题块：时长 < 阈值，取最新 12 条；source=short 标记让前端点标题跳到短视频网格
-            short_rows = db.query(
-                "SELECT id, title, vodPic, duration, author, readNumber, createTime "
-                "FROM videos WHERE duration > 0 AND duration < %s "
-                "ORDER BY createTime DESC LIMIT 12", (SHORT_MAX_SEC,))
-            if len(short_rows) >= 4:
-                out = [{"id": "short", "title": "短视频", "source": "short", "items": [{
-                    "id": r["id"], "title": r["title"], "cover": pic_url(r["vodPic"]),
-                    "duration": r["duration"], "author": r["author"],
-                    "readNumber": r["readNumber"], "createTime": r["createTime"],
-                } for r in short_rows]}] + out
-            if out:
-                _home["data"] = out
-                _home["t"] = time.time()
-        except Exception:
-            pass
+                b = buckets.setdefault(tid, {"id": tid, "title": name, "items": []})
+                if len(b["items"]) < 12:    # 归入第一个未满的所属专题即停，自动均摊
+                    b["items"].append({
+                        "id": r["id"], "title": r["title"],
+                        "cover": pic_url(r["vodPic"]),
+                        "cover_local": f"/api/cover/{r['id']}",
+                        "duration": r["duration"], "author": r["author"],
+                        "readNumber": r["readNumber"], "createTime": r["createTime"],
+                    })
+                    used.add(r["id"])
+                    break
+        # 视频太少的专题不单独成块；视频多的专题排前面
+        out = sorted((b for b in buckets.values() if len(b["items"]) >= 4),
+                     key=lambda b: len(b["items"]), reverse=True)
+        # 「短视频」专题块：时长 < 阈值，取最新 12 条；source=short 标记让前端点标题跳到短视频网格
+        short_rows = db.query(
+            "SELECT id, title, vodPic, duration, author, readNumber, createTime "
+            "FROM videos WHERE duration > 0 AND duration < %s "
+            "ORDER BY createTime DESC LIMIT 12", (SHORT_MAX_SEC,))
+        if len(short_rows) >= 4:
+            out = [{"id": "short", "title": "短视频", "source": "short", "items": [{
+                "id": r["id"], "title": r["title"], "cover": pic_url(r["vodPic"]),
+                "cover_local": f"/api/cover/{r['id']}",
+                "duration": r["duration"], "author": r["author"],
+                "readNumber": r["readNumber"], "createTime": r["createTime"],
+            } for r in short_rows]}] + out
+        if out:
+            _home["data"] = out
+            _home["t"] = time.time()
+    except Exception:
+        pass
+    return _home["data"]
+
+
+@app.get("/api/home")
+def home(_=Depends(require_auth)):
+    if not _home["data"]:
+        _refresh_home()                         # 手上没数据：只能同步跑一次，别返回空首页
+    elif time.time() - _home["t"] > 300:
+        _swr("home", _refresh_home)             # 纯本地库查询，慢一拍只是新视频晚几秒上首页
     return _home["data"]
 
 

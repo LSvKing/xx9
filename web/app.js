@@ -11,24 +11,32 @@ const io = new IntersectionObserver((entries) => {
   for (const e of entries) {
     if (!e.isIntersecting) continue;
     io.unobserve(e.target);
-    loadCover(e.target, e.target.dataset.cover);
+    loadCover(e.target, e.target.dataset.cover, e.target.dataset.vid);
   }
 }, { rootMargin: '400px' });
 
-async function loadCover(img, url) {
+async function loadCover(img, url, vid) {
+  if (!url && !vid) return;
+  // 优先走后端解密代理：海阔/浏览器都可直接 <img src>
+  if (vid) {
+    img.src = '/api/cover/' + vid;
+    img.onerror = () => { img.style.opacity = 0.2; };
+    return;
+  }
   if (!url) return;
   if (imgSecret !== '1') { img.src = url; return; }
   try {
     const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
     const k = buf[0];
     for (let i = 1; i < buf.length; i++) buf[i] ^= k;   // 每字节 XOR 首字节
-    img.src = URL.createObjectURL(new Blob([buf.slice(1)], { type: 'image/png' }));  // 丢首字节
+    img.src = URL.createObjectURL(new Blob([buf.slice(1)], { type: 'image/jpeg' }));  // 丢首字节
   } catch (e) { img.style.opacity = 0.2; }
 }
 
 // ---------- 登录 ----------
 async function checkAuth() {
   const r = await api('/api/me').then(r => r.json());
+  imgSecret = r.img_secret || '1';   // 这里就拿到了，init 里不必再请求一次
   if (r.auth) { $('#login').classList.add('hidden'); init(); }
   else { $('#login').classList.remove('hidden'); }
 }
@@ -76,7 +84,7 @@ function card(v) {
   el.className = isShort(v) ? 'card short' : 'card';   // 短视频卡片竖版
   el.innerHTML = `
     <div class="thumb">
-      <img class="cover" data-cover="${v.cover}">
+      <img class="cover" data-cover="${esc(v.cover || '')}" data-vid="${v.id}">
       <span class="dur">${fmtDur(v.duration)}</span>
     </div>
     <div class="title">${esc(v.title || '')}</div>
@@ -451,18 +459,20 @@ async function downloadHls(m3u8Url, fname, btn) {
 
 // ---------- 初始化 ----------
 async function init() {
-  try { imgSecret = (await api('/api/me').then(r => r.json())).img_secret || '1'; } catch (e) {}
-  // 分类下拉
-  try {
-    const gs = await api('/api/groups').then(r => r.json());
+  // 分类下拉、专题字典只喂筛选框和面包屑，不该挡首屏：不 await，回来了再补渲染
+  api('/api/groups').then(r => r.json()).then(gs => {
     for (const g of gs) {
       const o = document.createElement('option');
       o.value = g.id; o.textContent = g.name;
       $('#group').appendChild(o);
     }
-  } catch (e) {}
+    syncControls(parseHash());     // 选项后到，把当前分类回填选中
+  }).catch(() => {});
   // 专题字典（id->title），点专题进列表时面包屑显示专题名
-  try { themeMap = await api('/api/themes').then(r => r.json()); } catch (e) {}
+  api('/api/themes').then(r => r.json()).then(m => {
+    themeMap = m;
+    renderCrumb(parseHash());      // 字典后到，把面包屑的「合集」换成真名
+  }).catch(() => {});
   // 深链直接进视频时，垫一个历史条目，让后退能回上一层而不是退站
   if (parseHash().v) {
     const full = location.hash;
