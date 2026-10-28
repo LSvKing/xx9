@@ -1,6 +1,14 @@
 package com.xx9.app.ui.screens
 
 import android.view.LayoutInflater
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.view.WindowManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.compose.BackHandler
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -149,6 +157,42 @@ fun PlayerScreen(
     val lines = detail?.lines.orEmpty()
     val short = MediaRules.isShort(detail?.duration)
     val casting = castState is CastState.Playing
+    val activity = remember(context) { context.findActivity() }
+    // 全屏：短→竖屏 immersive；长→横屏 immersive；离开恢复竖屏
+    DisposableEffect(detail?.id, short) {
+        val act = activity
+        if (act == null || detail == null) {
+            return@DisposableEffect onDispose { }
+        }
+        val prevOrientation = act.requestedOrientation
+        act.requestedOrientation = if (short) {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        onDispose {
+            runCatching {
+                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+        }
+    }
+
+    fun restorePortraitUi() {
+        val act = activity ?: return
+        runCatching {
+            act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
 
     val exo = remember {
         ExoPlayer.Builder(context).build()
@@ -181,6 +225,7 @@ fun PlayerScreen(
 
     fun safeBack() {
         teardownPlayback()
+        restorePortraitUi()
         onBack()
     }
 
@@ -225,40 +270,39 @@ fun PlayerScreen(
         exo.playWhenReady = !casting
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(Surface)
-                .statusBarsPadding(),
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { safeBack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
-                }
-                Text(
-                    detail?.title ?: "播放",
-                    color = Fg,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontSize = 16.sp,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
             loading -> LoadingBlock()
-            err != null -> ErrorState(err!!, "请确认 Base URL 与服务是否可用", "重试") {
-                loading = true
+            err != null -> {
+                Column(Modifier.fillMaxSize().background(Bg)) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .height(56.dp)
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { safeBack() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
+                        }
+                        Text("播放", color = Fg, fontSize = 16.sp)
+                    }
+                    ErrorState(err!!, "请确认 Base URL 与服务是否可用", "重试") {
+                        loading = true
+                    }
+                }
             }
             else -> {
+                // 全屏画面：短竖 immersive / 长横 immersive（orientation 由 duration 决定）
+                PlayerSurface(
+                    short = short,
+                    casting = casting,
+                    exo = exo,
+                    surfaceVisible = surfaceVisible && !casting,
+                    fullscreen = true,
+                    onPlayerView = { playerViewRef = it },
+                )
                 if (casting) {
                     CastBanner(
                         deviceName = (castState as CastState.Playing).deviceName,
@@ -272,93 +316,109 @@ fun PlayerScreen(
                     )
                 }
 
-                PlayerSurface(
-                    short = short,
-                    casting = casting,
-                    exo = exo,
-                    surfaceVisible = surfaceVisible && !casting,
-                    onPlayerView = { playerViewRef = it },
-                )
-
                 Column(
-                    Modifier
-                        .weight(1f, fill = true)
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                        .then(if (!casting) Modifier.navigationBarsPadding() else Modifier),
-                ) {
-                    Text(detail?.title.orEmpty(), color = Fg, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(10.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        itemsIndexed(lines) { idx, ln ->
-                            FilterChip(
-                                selected = idx == lineIndex,
-                                onClick = { lineIndex = idx },
-                                label = { Text(ln.name) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Acc.copy(alpha = 0.15f),
-                                    selectedLabelColor = Acc,
-                                ),
+                        Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopStart)
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .statusBarsPadding(),
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = { safeBack() }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                            }
+                            Text(
+                                detail?.title ?: "播放",
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontSize = 16.sp,
+                                modifier = Modifier.weight(1f),
                             )
                         }
                     }
-                    if (playErr != null) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(playErr!!, color = CastBlock, fontSize = 12.sp)
-                        if (lineIndex + 1 < lines.size) {
-                            TextButton(onClick = { lineIndex += 1 }) {
-                                Text("切换线路", color = Acc)
+
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .navigationBarsPadding()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                    ) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            itemsIndexed(lines) { idx, ln ->
+                                FilterChip(
+                                    selected = idx == lineIndex,
+                                    onClick = { lineIndex = idx },
+                                    label = { Text(ln.name) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Acc.copy(alpha = 0.25f),
+                                        selectedLabelColor = Acc,
+                                        containerColor = Color.White.copy(alpha = 0.12f),
+                                        labelColor = Color.White,
+                                    ),
+                                )
                             }
                         }
-                    }
-                    if (lines.isEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text("暂无播放线路", color = CastBlock, fontSize = 14.sp)
-                        Text("服务已免密，但取流地址为空。可重试详情或稍后再试。", color = Mut, fontSize = 12.sp)
-                        TextButton(onClick = { loading = true }) { Text("重新拉取详情", color = Acc) }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    PlayerActions(
-                        fav = fav,
-                        casting = casting,
-                        onFav = {
-                            scope.launch {
-                                runCatching { api.toggleFavorite(videoId) }.onSuccess { fav = it }
-                            }
-                        },
-                        onCast = { refreshCast(); showCast = true },
-                        onSync = if (casting) {
-                            {
-                                scope.launch {
-                                    val url = lines.getOrNull(lineIndex)?.url
-                                    val d = app.castManager.currentDevice
-                                    if (url != null && d != null) {
-                                        app.castManager.castTo(d, url)
-                                        refreshCast()
-                                    }
+                        if (playErr != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(playErr!!, color = CastBlock, fontSize = 12.sp)
+                            if (lineIndex + 1 < lines.size) {
+                                TextButton(onClick = { lineIndex += 1 }) {
+                                    Text("切换线路", color = Acc)
                                 }
                             }
-                        } else null,
-                    )
-                    if (!casting) {
+                        }
+                        if (lines.isEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Text("暂无播放线路", color = CastBlock, fontSize = 14.sp)
+                            TextButton(onClick = { loading = true }) { Text("重新拉取详情", color = Acc) }
+                        }
                         Spacer(Modifier.height(8.dp))
-                        Text("点「投屏」选择同一 Wi‑Fi 下的电视 / 盒子 (DLNA)", color = Mut, fontSize = 12.sp)
+                        PlayerActions(
+                            fav = fav,
+                            casting = casting,
+                            onFav = {
+                                scope.launch {
+                                    runCatching { api.toggleFavorite(videoId) }.onSuccess { fav = it }
+                                }
+                            },
+                            onCast = { refreshCast(); showCast = true },
+                            onSync = if (casting) {
+                                {
+                                    scope.launch {
+                                        val url = lines.getOrNull(lineIndex)?.url
+                                        val d = app.castManager.currentDevice
+                                        if (url != null && d != null) {
+                                            app.castManager.castTo(d, url)
+                                            refreshCast()
+                                        }
+                                    }
+                                }
+                            } else null,
+                        )
+                        if (casting) {
+                            Spacer(Modifier.height(8.dp))
+                            CastRemoteBar(
+                                onPause = { scope.launch { app.castManager.pause(); refreshCast() } },
+                                onResume = { scope.launch { app.castManager.resume(); refreshCast() } },
+                                onStop = {
+                                    scope.launch {
+                                        app.castManager.stop()
+                                        refreshCast()
+                                        exo.playWhenReady = true
+                                    }
+                                },
+                            )
+                        }
                     }
-                }
-
-                if (casting) {
-                    CastRemoteBar(
-                        onPause = { scope.launch { app.castManager.pause(); refreshCast() } },
-                        onResume = { scope.launch { app.castManager.resume(); refreshCast() } },
-                        onStop = {
-                            scope.launch {
-                                app.castManager.stop()
-                                refreshCast()
-                                exo.playWhenReady = true
-                            }
-                        },
-                    )
-                }
             }
         }
     }
@@ -380,22 +440,23 @@ private fun PlayerSurface(
     casting: Boolean,
     exo: ExoPlayer,
     surfaceVisible: Boolean,
+    fullscreen: Boolean = false,
     onPlayerView: (PlayerView?) -> Unit,
 ) {
     Box(
         Modifier
-            .fillMaxWidth()
+            .then(if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth())
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
-        val boxMod = if (short) {
-            Modifier
+        val boxMod = when {
+            fullscreen -> Modifier.fillMaxSize()
+            short -> Modifier
                 .widthIn(max = 460.dp)
                 .fillMaxWidth(0.72f)
                 .aspectRatio(9f / 16f)
                 .heightIn(max = 520.dp)
-        } else {
-            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+            else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
         }
         Box(boxMod, contentAlignment = Alignment.Center) {
             when {
@@ -411,6 +472,8 @@ private fun PlayerSurface(
                         factory = { ctx ->
                             val pv = LayoutInflater.from(ctx)
                                 .inflate(R.layout.xx9_player_view, null, false) as PlayerView
+                            // FIT：短竖/长横全屏时完整入画，不裁切
+                            pv.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                             pv.player = exo
                             onPlayerView(pv)
                             pv
@@ -429,6 +492,15 @@ private fun PlayerSurface(
             }
         }
     }
+}
+
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 @Composable
