@@ -4,6 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -97,7 +99,13 @@ private fun Xx9Root(app: Xx9App) {
                 startDestination = "home",
                 modifier = Modifier.fillMaxSize(),
             ) {
-                composable("home") {
+                composable(
+                    "home",
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
                     val homeVm: HomeViewModel = viewModel(
                         factory = HomeViewModel.Factory(app.api),
                     )
@@ -224,6 +232,10 @@ private fun Xx9Root(app: Xx9App) {
                 composable(
                     "player/{id}",
                     arguments = listOf(navArgument("id") { type = NavType.IntType }),
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
                 ) { entry ->
                     val id = entry.arguments?.getInt("id") ?: return@composable
                     PlayerScreen(videoId = id, api = app.api, onBack = { nav.popBackStack() })

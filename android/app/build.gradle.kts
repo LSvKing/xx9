@@ -12,8 +12,8 @@ android {
         applicationId = "com.xx9.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.0.1-native"
+        versionCode = 4
+        versionName = "2.0.2-native"
     }
 
     buildTypes {

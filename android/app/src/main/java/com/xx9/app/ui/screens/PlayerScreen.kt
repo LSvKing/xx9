@@ -1,5 +1,7 @@
 package com.xx9.app.ui.screens
 
+import android.view.LayoutInflater
+import androidx.activity.compose.BackHandler
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
@@ -61,6 +63,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -74,6 +79,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.ui.PlayerView
+import com.xx9.app.R
 import com.xx9.app.Xx9App
 import com.xx9.app.cast.CastManager
 import com.xx9.app.cast.CastState
@@ -114,6 +120,8 @@ fun PlayerScreen(
     var showCast by remember { mutableStateOf(false) }
     var castState by remember { mutableStateOf(app.castManager.state) }
     var fav by remember { mutableStateOf(false) }
+    var surfaceVisible by remember { mutableStateOf(true) }
+    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
 
     fun refreshCast() { castState = app.castManager.state }
 
@@ -159,8 +167,47 @@ fun PlayerScreen(
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
     }
-    DisposableEffect(Unit) { onDispose { exo.release() } }
+    fun teardownPlayback() {
+        surfaceVisible = false
+        runCatching {
+            exo.playWhenReady = false
+            exo.pause()
+            exo.stop()
+            exo.clearVideoSurface()
+            exo.clearMediaItems()
+        }
+        playerViewRef?.player = null
+    }
 
+    fun safeBack() {
+        teardownPlayback()
+        onBack()
+    }
+
+    BackHandler { safeBack() }
+
+    // 退到后台 / 离开页：先清画面，避免 Surface 残留一帧盖住下层
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exo) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                exo.playWhenReady = false
+                runCatching { exo.clearVideoSurface() }
+                surfaceVisible = false
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                if (detail != null && !casting) {
+                    surfaceVisible = true
+                    exo.playWhenReady = true
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(obs)
+            teardownPlayback()
+            runCatching { exo.release() }
+        }
+    }
 
     LaunchedEffect(detail, lineIndex) {
         val url = lines.getOrNull(lineIndex)?.url
@@ -192,7 +239,7 @@ fun PlayerScreen(
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = { safeBack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
                 }
                 Text(
@@ -229,6 +276,8 @@ fun PlayerScreen(
                     short = short,
                     casting = casting,
                     exo = exo,
+                    surfaceVisible = surfaceVisible && !casting,
+                    onPlayerView = { playerViewRef = it },
                 )
 
                 Column(
@@ -326,16 +375,20 @@ fun PlayerScreen(
 }
 
 @Composable
-private fun PlayerSurface(short: Boolean, casting: Boolean, exo: ExoPlayer) {
+private fun PlayerSurface(
+    short: Boolean,
+    casting: Boolean,
+    exo: ExoPlayer,
+    surfaceVisible: Boolean,
+    onPlayerView: (PlayerView?) -> Unit,
+) {
     Box(
         Modifier
             .fillMaxWidth()
-            .then(if (short) Modifier.fillMaxWidth() else Modifier)
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         val boxMod = if (short) {
-            // AMEND-3：短竖居中，限制高度避免顶栏出格后仍撑破屏
             Modifier
                 .widthIn(max = 460.dp)
                 .fillMaxWidth(0.72f)
@@ -345,23 +398,34 @@ private fun PlayerSurface(short: Boolean, casting: Boolean, exo: ExoPlayer) {
             Modifier.fillMaxWidth().aspectRatio(16f / 9f)
         }
         Box(boxMod, contentAlignment = Alignment.Center) {
-            if (casting) {
-                Text("画面在电视上", color = Mut, fontSize = 13.sp)
-            } else {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = exo
-                            layoutParams = FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            )
-                            useController = true
-                        }
-                    },
-                    update = { it.player = exo },
-                    modifier = Modifier.fillMaxSize(),
-                )
+            when {
+                casting || !surfaceVisible -> {
+                    Text(
+                        if (casting) "画面在电视上" else "",
+                        color = Mut,
+                        fontSize = 13.sp,
+                    )
+                }
+                else -> {
+                    AndroidView(
+                        factory = { ctx ->
+                            val pv = LayoutInflater.from(ctx)
+                                .inflate(R.layout.xx9_player_view, null, false) as PlayerView
+                            pv.player = exo
+                            onPlayerView(pv)
+                            pv
+                        },
+                        update = { pv ->
+                            if (surfaceVisible) {
+                                pv.player = exo
+                                onPlayerView(pv)
+                            } else {
+                                pv.player = null
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
         }
     }
