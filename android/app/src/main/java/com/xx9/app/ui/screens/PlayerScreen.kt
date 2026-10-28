@@ -104,6 +104,7 @@ fun PlayerScreen(
     var err by remember { mutableStateOf<String?>(null) }
     var lineIndex by remember { mutableIntStateOf(0) }
     var playErr by remember { mutableStateOf<String?>(null) }
+    var autoSwitchedFrom by remember { mutableIntStateOf(-1) }
     var showCast by remember { mutableStateOf(false) }
     var castState by remember { mutableStateOf(app.castManager.state) }
     var fav by remember { mutableStateOf(false) }
@@ -131,20 +132,29 @@ fun PlayerScreen(
             }
     }
 
-    val exo = remember {
-        ExoPlayer.Builder(context).build().also { p ->
-            p.addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    playErr = "播放失败：${error.message ?: error.errorCodeName}"
-                }
-            })
-        }
-    }
-    DisposableEffect(Unit) { onDispose { exo.release() } }
-
     val lines = detail?.lines.orEmpty()
     val short = MediaRules.isShort(detail?.duration)
     val casting = castState is CastState.Playing
+
+    val exo = remember {
+        ExoPlayer.Builder(context).build()
+    }
+    DisposableEffect(exo, lines.size, lineIndex) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                playErr = "播放失败：${error.message ?: error.errorCodeName}"
+                // 对齐 Web：致命错误自动切下一线（每条线最多自动切一次）
+                if (lineIndex + 1 < lines.size && autoSwitchedFrom != lineIndex) {
+                    autoSwitchedFrom = lineIndex
+                    lineIndex += 1
+                }
+            }
+        }
+        exo.addListener(listener)
+        onDispose { exo.removeListener(listener) }
+    }
+    DisposableEffect(Unit) { onDispose { exo.release() } }
+
 
     LaunchedEffect(detail, lineIndex) {
         val url = lines.getOrNull(lineIndex)?.url

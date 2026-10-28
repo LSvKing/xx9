@@ -137,10 +137,21 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
         ensureSession()
         val o = JSONObject(execute(req("/api/video/$id").get()))
         val linesArr = o.optJSONArray("lines") ?: JSONArray()
-        val lines = buildList {
+        var lines = buildList {
             for (i in 0 until linesArr.length()) {
                 val ln = linesArr.getJSONObject(i)
-                add(PlayLine(ln.optString("name", "线路${i + 1}"), ln.optString("url")))
+                val u = ln.optString("url")
+                if (u.isNotBlank()) add(PlayLine(ln.optString("name", "线路${i + 1}"), u))
+            }
+        }
+        // Web 同源：lines 空时用 sources[]
+        if (lines.isEmpty()) {
+            val src = o.optJSONArray("sources") ?: JSONArray()
+            lines = buildList {
+                for (i in 0 until src.length()) {
+                    val u = src.optString(i)
+                    if (u.isNotBlank()) add(PlayLine("线路${i + 1}", u))
+                }
             }
         }
         val tagsArr = o.optJSONArray("tags") ?: JSONArray()
