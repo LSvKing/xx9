@@ -219,8 +219,11 @@ def reload_creds() -> bool:
         MEDIA_BASE = cr.get("media_base") or MEDIA_BASE
         PIC_BASE = cr.get("pic_base") or PIC_BASE
         MP4_BASE = cr.get("mp4_base") or MP4_BASE
-        ACCESS_TOKEN = cr["access_token"] or ACCESS_TOKEN
-        JWT_TOKEN = cr["jwt_token"] or JWT_TOKEN
+        # 空串不覆盖：避免 credentials 脏行把仍可用的内存 token 冲掉
+        if cr.get("access_token"):
+            ACCESS_TOKEN = cr["access_token"]
+        if cr.get("jwt_token"):
+            JWT_TOKEN = cr["jwt_token"]
         CREDS_SOURCE = "MySQL credentials 表 @ " + str(cr.get("captured_at", ""))[:19]
         return True
     return False
@@ -344,9 +347,12 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     if "data" not in data or "time" not in data:
         return data
     res = json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
-    # 1034=JwtToken 过期；1019=AccessToken/上游 Token 过期（运维：与 1034 同走 reload）
-    if (not _retried and isinstance(res, dict) and res.get("code") in (1034, 1019)
-            and _maybe_reload_creds()):
+    # 1034=JwtToken 过期；1019=AccessToken/上游 Token 过期 — 与 1034 同走热重载+重试
+    if (not _retried and isinstance(res, dict) and res.get("code") in (1034, 1019)):
+        reloaded = _maybe_reload_creds()
+        if not reloaded:
+            # 冷却期内别的请求可能正在 reload；稍等再用当前全局凭证重试一次
+            time.sleep(0.5)
         return api_call(uri, method, params, timeout, use_proxy, _retried=True)
     return res
 
@@ -681,12 +687,44 @@ def _err_reason(e) -> str:
     return n
 
 
+# 上游鉴权/限流类错误码：详情响应无 vod 时不能记成「空洞」(已删除)
+_AUTH_FAIL_CODES = {1019, 1034, 1032, 1062}
+
+
+def _detail_fail_reason(data: dict):
+    """若响应是鉴权/业务失败（非「已删除空洞」），返回原因字符串；否则 None。"""
+    if not isinstance(data, dict):
+        return "响应非对象"
+    code = data.get("code")
+    if code in _AUTH_FAIL_CODES:
+        return f"上游{code}"
+    # 显式失败码（非 0 / 非成功），且没有 vod — 不当空洞
+    if code not in (None, 0, "0") and not ((data.get("result") or {}).get("vod") or {}).get("id"):
+        msg = (data.get("msg") or data.get("message") or "").strip()
+        # FAT20001 = 已删除，仍算空洞（返回 None 让调用方走 gap）
+        if "FAT20001" in str(code) or "FAT20001" in msg or "已删除" in msg:
+            return None
+        if code not in (200, "200"):
+            return f"上游{code}" + (f":{msg[:40]}" if msg else "")
+    return None
+
+
 def _fetch_detail(vid, retries: int = 4):
-    """抓单条详情，失败重试 + 退避。成功返回 dict；彻底失败返回原因字符串。"""
+    """抓单条详情，失败重试 + 退避。成功返回 dict；彻底失败返回原因字符串。
+    含 1019/1034 等鉴权失败：不当成功、不记空洞，返回原因供 err 计数。"""
     reason = "未知"
     for att in range(retries):
         try:
-            return api_call(f"cms/vod/detail/{vid}", method=1)   # dict = 成功
+            data = api_call(f"cms/vod/detail/{vid}", method=1)
+            fail = _detail_fail_reason(data) if isinstance(data, dict) else "响应非对象"
+            if fail:
+                reason = fail
+                if att < retries - 1:
+                    _maybe_reload_creds()
+                    time.sleep(0.5 * (att + 1))
+                    continue
+                return reason
+            return data   # dict = 成功或真实空洞（无 vod.id / FAT20001）
         except Exception as e:
             reason = _err_reason(e)
             if att < retries - 1:
@@ -720,11 +758,17 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str, ve
             reasons[data] = reasons.get(data, 0) + 1
             if verbose:
                 print(f"\n  ✗ id={vid} 失败: {data}", flush=True)
+        elif (fail := _detail_fail_reason(data)):
+            # 1019 等鉴权空壳：绝不记「空洞」成功
+            failed.append(vid)
+            reasons[fail] = reasons.get(fail, 0) + 1
+            if verbose:
+                print(f"\n  ✗ id={vid} 失败: {fail}", flush=True)
         elif (data.get("result") or {}).get("vod", {}).get("id"):
             ok += 1
             det_buf.append(data)
         else:
-            gap += 1
+            gap += 1                              # 真空洞：上游确认无此片
         if len(det_buf) >= batch:
             flush()
         if show and (done % 100 == 0 or done == total):

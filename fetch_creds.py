@@ -290,29 +290,20 @@ def main():
     print(f"打开 {args.url} 抓取域名/token ...")
     cap = asyncio.run(capture(args.url, args.headful, get_keys(cfg), dump=args.dump_api))
 
-    if not cap["api_base"] or not cap["jwt_token"]:   # access_token 现已可选，只要这俩
+    if not cap["api_base"] or not cap["jwt_token"]:   # 缺域名/jwt 直接失败；access_token 见下
         print("未捕获到 API 域名/jwt_token，可能原因:")
         print("  1. 代理未生效（这些域名直连会被重置，需走代理）")
         print("  2. 入口域名已失效，换一个 --url（或不带 --url 用默认 xx9.com/enter）")
         print(f"  当前捕获: {cap}")
         raise SystemExit(1)
     if not cap["access_token"]:
-        # 详情/播放接口必须有 access_token（搜索不需要），它较稳定：抓不到就沿用库里最近一个有效的
-        try:
-            conn0 = mysql_conn(cfg)
-            with conn0.cursor() as cur0:
-                cur0.execute("SELECT access_token FROM credentials WHERE access_token IS NOT NULL "
-                             "AND access_token<>'' ORDER BY id DESC LIMIT 1")
-                r0 = cur0.fetchone()
-            conn0.close()
-            if r0:
-                cap["access_token"] = r0["access_token"]
-                print(f"  access_token 没抓到，沿用库里最近有效的: {cap['access_token'][:12]}...")
-        except Exception:
-            pass
-        if not cap["access_token"]:
-            print("  ⚠️ access_token 没抓到、库里也没有 → 详情/播放接口会报 1032，"
-                  "需换个能完整登录的入口（如默认 xx9.com/enter）重抓")
+        # 运维：上游 register/free 1062 限流时经常抓不到新 access_token。
+        # 禁止写入/复用过期 credentials 行——否则长驻进程 reload 会把过期 token 当「新凭证」，
+        # 详情大批量 1019 空壳被误记成空洞。
+        print("  ✗ access_token 未捕获（可能 register/free 1062 限流）。")
+        print("    拒绝写入 credentials，也不沿用库内旧 token。请稍后再跑或换入口。")
+        print(f"  当前捕获: api_base={cap.get('api_base')!r} jwt={'有' if cap.get('jwt_token') else '无'}")
+        raise SystemExit(2)
 
     frontend = (cap["origin"] or "").rstrip("/")
     if not frontend and cap["final_url"]:
@@ -322,6 +313,10 @@ def main():
     # 用刚抓到的凭证拉 CDN 前缀（图片/视频/mp4），拉不到则沿用 config
     cdn = fetch_cdn_prefixes(cap["api_base"], cap["access_token"], cap["jwt_token"],
                              frontend or cap["api_base"], get_keys(cfg))
+
+    if not cap.get("access_token") or not cap.get("jwt_token") or not cap.get("api_base"):
+        print("  ✗ 凭证不完整，跳过写入 credentials")
+        raise SystemExit(2)
 
     row = {
         "api_base": cap["api_base"],
