@@ -1,7 +1,6 @@
 package com.xx9.app.ui.screens
 
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -26,7 +25,8 @@ import com.xx9.app.data.ApiException
 import com.xx9.app.data.GroupItem
 import com.xx9.app.data.VideoItem
 import com.xx9.app.data.Xx9Api
-import com.xx9.app.ui.ErrorBlock
+import com.xx9.app.ui.EmptyState
+import com.xx9.app.ui.ErrorState
 import com.xx9.app.ui.LoadingBlock
 import com.xx9.app.ui.VideoGrid
 import com.xx9.app.ui.theme.Acc
@@ -43,6 +43,9 @@ fun BrowseScreen(
     initialTheme: Int = 0,
     initialTitle: String = "全部",
     source: String = "all",
+    forceSearch: Boolean = false,
+    emptyTitle: String = "暂无内容",
+    emptySubtitle: String? = null,
     onOpenVideo: (Int) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -58,7 +61,8 @@ fun BrowseScreen(
     var loadingMore by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
     var searchJob by remember { mutableStateOf<Job?>(null) }
-
+    val showFilters = source == "all" && !forceSearch
+    val showSearch = source == "all" || forceSearch
     val sorts = listOf("new" to "最新", "hot" to "最热", "long" to "最长")
 
     fun load(reset: Boolean) {
@@ -67,9 +71,7 @@ fun BrowseScreen(
                 loading = true
                 err = null
                 page = 1
-            } else {
-                loadingMore = true
-            }
+            } else loadingMore = true
             val p = if (reset) 1 else page + 1
             runCatching {
                 api.videos(q = q, group = group, theme = theme, sort = sort, source = source, page = p)
@@ -81,8 +83,8 @@ fun BrowseScreen(
                 loadingMore = false
             }.onFailure {
                 err = when (it) {
-                    is ApiException -> "加载失败（${it.code}）：${it.message}"
-                    else -> "网络错误：${it.message ?: "未知"}"
+                    is ApiException -> "无法连接服务器"
+                    else -> "网络异常"
                 }
                 loading = false
                 loadingMore = false
@@ -91,13 +93,15 @@ fun BrowseScreen(
     }
 
     LaunchedEffect(Unit) {
-        runCatching { api.groups() }.onSuccess { groups = it }
+        if (showFilters) runCatching { api.groups() }.onSuccess { groups = it }
         load(true)
     }
-    LaunchedEffect(sort, group, theme, source) { load(true) }
+    LaunchedEffect(sort, group, theme, source) {
+        if (!loading || items.isNotEmpty()) load(true)
+    }
 
     Column(Modifier.fillMaxSize()) {
-        if (source == "all") {
+        if (showSearch) {
             OutlinedTextField(
                 value = q,
                 onValueChange = {
@@ -108,9 +112,9 @@ fun BrowseScreen(
                         load(true)
                     }
                 },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
                 singleLine = true,
-                placeholder = { Text("搜索标题", color = Mut) },
+                placeholder = { Text("搜索片名…", color = Mut) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Acc,
                     unfocusedBorderColor = Line,
@@ -119,6 +123,8 @@ fun BrowseScreen(
                     cursorColor = Acc,
                 ),
             )
+        }
+        if (showFilters) {
             LazyRow(Modifier.padding(horizontal = 8.dp)) {
                 items(sorts) { (k, label) ->
                     FilterChip(
@@ -127,8 +133,8 @@ fun BrowseScreen(
                         label = { Text(label) },
                         modifier = Modifier.padding(horizontal = 4.dp),
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Acc,
-                            selectedLabelColor = Fg,
+                            selectedContainerColor = Acc.copy(alpha = 0.15f),
+                            selectedLabelColor = Acc,
                         ),
                     )
                 }
@@ -149,14 +155,12 @@ fun BrowseScreen(
                     )
                 }
             }
-        } else {
-            Text(initialTitle, color = Acc, modifier = Modifier.padding(16.dp))
         }
 
         when {
             loading -> LoadingBlock()
-            err != null && items.isEmpty() -> ErrorBlock(err!!) { load(true) }
-            items.isEmpty() -> ErrorBlock("暂无内容") { load(true) }
+            err != null && items.isEmpty() -> ErrorState(err!!, "请检查网络后重试") { load(true) }
+            items.isEmpty() -> EmptyState(emptyTitle, emptySubtitle)
             else -> VideoGrid(
                 items = items,
                 coverOf = { api.coverUrl(it) },

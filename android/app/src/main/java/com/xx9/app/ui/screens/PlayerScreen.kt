@@ -4,6 +4,8 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,15 +16,25 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cast
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
@@ -40,33 +52,43 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.ui.PlayerView
 import com.xx9.app.Xx9App
+import com.xx9.app.cast.CastManager
 import com.xx9.app.cast.CastState
+import com.xx9.app.cast.DlnaDevice
 import com.xx9.app.data.ApiException
+import com.xx9.app.data.MediaRules
 import com.xx9.app.data.VideoDetail
 import com.xx9.app.data.Xx9Api
-import com.xx9.app.ui.ErrorBlock
+import com.xx9.app.ui.ErrorState
 import com.xx9.app.ui.LoadingBlock
 import com.xx9.app.ui.theme.Acc
 import com.xx9.app.ui.theme.Bg
 import com.xx9.app.ui.theme.CastBlock
+import com.xx9.app.ui.theme.CastSoft
 import com.xx9.app.ui.theme.Fg
+import com.xx9.app.ui.theme.Line
 import com.xx9.app.ui.theme.Mut
+import com.xx9.app.ui.theme.Surface
 import kotlinx.coroutines.launch
 
-@androidx.annotation.OptIn(UnstableApi::class)
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(UnstableApi::class)
+@kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
     videoId: Int,
@@ -82,14 +104,9 @@ fun PlayerScreen(
     var lineIndex by remember { mutableIntStateOf(0) }
     var playErr by remember { mutableStateOf<String?>(null) }
     var showCast by remember { mutableStateOf(false) }
-    var castState by remember { mutableStateOf<CastState>(app.castManager.state) }
+    var castState by remember { mutableStateOf(app.castManager.state) }
     var fav by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        app.castManager.let { /* snapshot */ }
-    }
-
-    // poll cast state lightly via reassignment when sheet opens / actions
     fun refreshCast() { castState = app.castManager.state }
 
     LaunchedEffect(videoId) {
@@ -105,8 +122,8 @@ fun PlayerScreen(
             }
             .onFailure {
                 err = when (it) {
-                    is ApiException -> "详情失败（${it.code}）：${it.message}"
-                    else -> "网络错误：${it.message ?: "未知"}"
+                    is ApiException -> "无法连接服务器"
+                    else -> "网络异常"
                 }
                 loading = false
             }
@@ -121,11 +138,12 @@ fun PlayerScreen(
             })
         }
     }
-    DisposableEffect(Unit) {
-        onDispose { exo.release() }
-    }
+    DisposableEffect(Unit) { onDispose { exo.release() } }
 
     val lines = detail?.lines.orEmpty()
+    val short = MediaRules.isShort(detail)
+    val casting = castState is CastState.Playing
+
     LaunchedEffect(detail, lineIndex) {
         val url = lines.getOrNull(lineIndex)?.url
         playErr = null
@@ -139,12 +157,12 @@ fun PlayerScreen(
         val source = HlsMediaSource.Factory(factory).createMediaSource(MediaItem.fromUri(url))
         exo.setMediaSource(source)
         exo.prepare()
-        exo.playWhenReady = true
+        exo.playWhenReady = !casting
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         Row(
-            Modifier.fillMaxWidth().padding(4.dp),
+            Modifier.fillMaxWidth().height(56.dp).background(Surface).padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
@@ -154,92 +172,108 @@ fun PlayerScreen(
                 detail?.title ?: "播放",
                 color = Fg,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 16.sp,
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = {
-                scope.launch {
-                    runCatching { api.toggleFavorite(videoId) }.onSuccess { fav = it }
-                }
-            }) {
-                Icon(
-                    if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                    contentDescription = "收藏",
-                    tint = if (fav) CastBlock else Fg,
-                )
-            }
-            IconButton(onClick = { refreshCast(); showCast = true }) {
-                Icon(Icons.Filled.Cast, contentDescription = "投屏", tint = Acc)
-            }
         }
 
         when {
             loading -> LoadingBlock()
-            err != null -> ErrorBlock(err!!) { /* reload via parent */ }
+            err != null -> ErrorState(err!!, "请确认 Base URL 与服务是否可用", "重试") {
+                loading = true
+            }
             else -> {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .background(androidx.compose.ui.graphics.Color.Black),
-                ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                player = exo
-                                layoutParams = FrameLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                )
-                                useController = true
+                if (casting) {
+                    CastBanner(
+                        deviceName = (castState as CastState.Playing).deviceName,
+                        onDisconnect = {
+                            scope.launch {
+                                app.castManager.stop()
+                                refreshCast()
+                                exo.playWhenReady = true
                             }
                         },
-                        update = { it.player = exo },
-                        modifier = Modifier.fillMaxSize(),
                     )
                 }
-                if (playErr != null) {
-                    Text(playErr!!, color = CastBlock, modifier = Modifier.padding(12.dp))
-                    if (lineIndex + 1 < lines.size) {
-                        TextButton(onClick = { lineIndex += 1; playErr = null }) {
-                            Text("切换下一线路", color = Acc)
+
+                PlayerSurface(
+                    short = short,
+                    casting = casting,
+                    exo = exo,
+                )
+
+                Column(
+                    Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    Text(detail?.title.orEmpty(), color = Fg, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(10.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        itemsIndexed(lines) { idx, ln ->
+                            FilterChip(
+                                selected = idx == lineIndex,
+                                onClick = { lineIndex = idx },
+                                label = { Text(ln.name) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Acc.copy(alpha = 0.15f),
+                                    selectedLabelColor = Acc,
+                                ),
+                            )
                         }
                     }
-                }
-                Spacer(Modifier.height(8.dp))
-                Text("线路", color = Mut, modifier = Modifier.padding(horizontal = 12.dp))
-                LazyRow(
-                    Modifier.padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    itemsIndexed(lines) { idx, ln ->
-                        FilterChip(
-                            selected = idx == lineIndex,
-                            onClick = { lineIndex = idx },
-                            label = { Text(ln.name) },
-                        )
-                    }
-                }
-                val st = castState
-                if (st is CastState.Playing) {
-                    Text(
-                        "投屏中 · ${st.deviceName}",
-                        color = Acc,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                    TextButton(onClick = {
-                        scope.launch {
-                            // 切线后显式同步
-                            val url = lines.getOrNull(lineIndex)?.url
-                            val d = app.castManager.currentDevice
-                            if (url != null && d != null) {
-                                app.castManager.castTo(d, url)
-                                refreshCast()
+                    if (playErr != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(playErr!!, color = CastBlock, fontSize = 12.sp)
+                        if (lineIndex + 1 < lines.size) {
+                            TextButton(onClick = { lineIndex += 1 }) {
+                                Text("切换线路", color = Acc)
                             }
                         }
-                    }) { Text("同步到电视", color = Acc) }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    PlayerActions(
+                        fav = fav,
+                        casting = casting,
+                        onFav = {
+                            scope.launch {
+                                runCatching { api.toggleFavorite(videoId) }.onSuccess { fav = it }
+                            }
+                        },
+                        onCast = { refreshCast(); showCast = true },
+                        onSync = if (casting) {
+                            {
+                                scope.launch {
+                                    val url = lines.getOrNull(lineIndex)?.url
+                                    val d = app.castManager.currentDevice
+                                    if (url != null && d != null) {
+                                        app.castManager.castTo(d, url)
+                                        refreshCast()
+                                    }
+                                }
+                            }
+                        } else null,
+                    )
+                    if (!casting) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("点「投屏」选择同一 Wi‑Fi 下的电视 / 盒子 (DLNA)", color = Mut, fontSize = 12.sp)
+                    }
                 }
-                if (st is CastState.Failed) {
-                    Text(st.message, color = CastBlock, modifier = Modifier.padding(12.dp))
+
+                if (casting) {
+                    CastRemoteBar(
+                        onPause = { scope.launch { app.castManager.pause(); refreshCast() } },
+                        onResume = { scope.launch { app.castManager.resume(); refreshCast() } },
+                        onStop = {
+                            scope.launch {
+                                app.castManager.stop()
+                                refreshCast()
+                                exo.playWhenReady = true
+                            }
+                        },
+                    )
                 }
             }
         }
@@ -256,95 +290,298 @@ fun PlayerScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerSurface(short: Boolean, casting: Boolean, exo: ExoPlayer) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .then(if (short) Modifier.height(420.dp) else Modifier)
+            .background(Color.Black),
+        contentAlignment = Alignment.Center,
+    ) {
+        val boxMod = if (short) {
+            Modifier
+                .widthIn(max = 460.dp)
+                .fillMaxWidth(0.7f)
+                .aspectRatio(9f / 16f)
+        } else {
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+        }
+        Box(boxMod, contentAlignment = Alignment.Center) {
+            if (casting) {
+                Text("画面在电视上", color = Mut, fontSize = 13.sp)
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            player = exo
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            useController = true
+                        }
+                    },
+                    update = { it.player = exo },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CastBanner(deviceName: String, onDisconnect: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .background(CastSoft),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(4.dp).fillMaxHeight().background(CastBlock))
+        Text(
+            "投屏至 $deviceName",
+            color = Fg,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        TextButton(onClick = onDisconnect) {
+            Text("断开", color = CastBlock, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+private fun PlayerActions(
+    fav: Boolean,
+    casting: Boolean,
+    onFav: () -> Unit,
+    onCast: () -> Unit,
+    onSync: (() -> Unit)?,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ActionChip(
+            label = if (fav) "已收藏" else "收藏",
+            onClick = onFav,
+            leading = {
+                Icon(
+                    if (fav) Icons.Filled.Star else Icons.Filled.StarBorder,
+                    contentDescription = null,
+                    tint = Fg,
+                    modifier = Modifier.height(18.dp),
+                )
+            },
+        )
+        ActionChip(
+            label = if (casting) "已投屏" else "投屏",
+            onClick = onCast,
+            accentCast = casting,
+            leading = {
+                Box {
+                    Icon(Icons.Filled.Cast, contentDescription = null, tint = if (casting) CastBlock else Fg, modifier = Modifier.height(18.dp))
+                    Box(
+                        Modifier
+                            .align(Alignment.TopStart)
+                            .padding(top = 0.dp, start = 0.dp)
+                            .width(6.dp)
+                            .height(6.dp)
+                            .background(CastBlock, RoundedCornerShape(1.dp)),
+                    )
+                }
+            },
+        )
+        if (onSync != null) {
+            ActionChip(label = "同步到电视", onClick = onSync, dashed = true)
+        }
+    }
+}
+
+@Composable
+private fun ActionChip(
+    label: String,
+    onClick: () -> Unit,
+    leading: (@Composable () -> Unit)? = null,
+    accentCast: Boolean = false,
+    dashed: Boolean = false,
+) {
+    val borderColor = when {
+        accentCast -> CastBlock
+        dashed -> Mut
+        else -> Line
+    }
+    val bg = if (accentCast) CastSoft else Surface
+    Row(
+        Modifier
+            .height(44.dp)
+            .background(bg, RoundedCornerShape(10.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp)
+            .then(ModifierClick(onClick)),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        leading?.invoke()
+        Text(label, color = if (accentCast) CastBlock else Fg, fontSize = 13.sp)
+    }
+}
+
+private fun ModifierClick(onClick: () -> Unit): Modifier =
+    Modifier.clickable(onClick = onClick)
+
+@Composable
+private fun CastRemoteBar(
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(CastSoft)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.width(4.dp).height(44.dp).background(CastBlock))
+        Text("遥控", color = Fg, fontSize = 13.sp)
+        Spacer(Modifier.weight(1f))
+        RemoteBtn("暂停", onPause)
+        RemoteBtn("继续", onResume)
+        RemoteBtn("停止", onStop, danger = true)
+    }
+}
+
+@Composable
+private fun RemoteBtn(label: String, onClick: () -> Unit, danger: Boolean = false) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.height(44.dp),
+        shape = RoundedCornerShape(10.dp),
+    ) {
+        Text(label, color = if (danger) CastBlock else Fg)
+    }
+}
+
+@kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CastSheet(
     currentUrl: String?,
-    castManager: com.xx9.app.cast.CastManager,
+    castManager: CastManager,
     onClose: () -> Unit,
     onState: (CastState) -> Unit,
     onPauseLocal: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var devices by remember { mutableStateOf<List<com.xx9.app.cast.DlnaDevice>>(emptyList()) }
-    var discovering by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf<String?>(null) }
-    var state by remember { mutableStateOf(castManager.state) }
+    var devices by remember { mutableStateOf<List<DlnaDevice>>(emptyList()) }
+    var discovering by remember { mutableStateOf(true) }
+    var failMsg by remember { mutableStateOf<String?>(null) }
 
-    fun emit(s: CastState) {
-        state = s
-        onState(s)
-    }
+    fun emit() = onState(castManager.state)
 
-    LaunchedEffect(Unit) {
+    suspend fun scan() {
         discovering = true
-        msg = null
-        emit(CastState.Discovering)
-        val list = runCatching { castManager.discoverDevices() }.getOrDefault(emptyList())
-        devices = list
+        failMsg = null
+        onState(CastState.Discovering)
+        devices = runCatching { castManager.discoverDevices() }.getOrDefault(emptyList())
         discovering = false
-        emit(castManager.state)
-        if (list.isEmpty() && castManager.state !is CastState.Failed) {
-            msg = "未发现 DLNA 设备。请确认手机与电视同一 Wi‑Fi，且未开启 AP 隔离。"
-        }
+        emit()
     }
 
-    ModalBottomSheet(onDismissRequest = onClose, sheetState = sheet) {
-        Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text("投屏（DLNA）", color = Acc)
-            Spacer(Modifier.height(8.dp))
+    LaunchedEffect(Unit) { scan() }
+
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        sheetState = sheet,
+        containerColor = Surface,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        dragHandle = {
+            Column {
+                Box(Modifier.fillMaxWidth().height(4.dp).background(CastBlock))
+                Spacer(Modifier.height(8.dp))
+            }
+        },
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("投屏到", color = Fg, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                IconButton(onClick = { scope.launch { scan() } }, enabled = !discovering) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "刷新", tint = if (discovering) Mut else Fg)
+                }
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Fg)
+                }
+            }
+            Text("与手机同一 Wi‑Fi · DLNA", color = Mut, fontSize = 12.sp)
+            Spacer(Modifier.height(12.dp))
+
             when {
-                discovering || state is CastState.Discovering -> Text("正在搜索设备…", color = Mut)
-                state is CastState.Connecting -> Text("连接 ${(state as CastState.Connecting).deviceName}…", color = Mut)
-                state is CastState.Playing -> {
-                    Text("播放中 · ${(state as CastState.Playing).deviceName}", color = Acc)
-                    Row {
-                        TextButton(onClick = { scope.launch { castManager.pause(); emit(castManager.state) } }) {
-                            Text("暂停")
-                        }
-                        TextButton(onClick = { scope.launch { castManager.resume(); emit(castManager.state) } }) {
-                            Text("继续")
-                        }
-                        TextButton(onClick = {
-                            scope.launch {
-                                castManager.stop()
-                                emit(castManager.state)
-                                onClose()
-                            }
-                        }) { Text("停止投屏") }
+                discovering -> {
+                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Acc)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在查找设备…", color = Mut)
                     }
                 }
-                state is CastState.Failed -> Text((state as CastState.Failed).message, color = CastBlock)
-            }
-            if (msg != null) Text(msg!!, color = Mut, modifier = Modifier.padding(vertical = 8.dp))
-            devices.forEach { d ->
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            if (currentUrl.isNullOrBlank()) {
-                                msg = "当前无播放地址，无法投屏"
-                                return@launch
-                            }
-                            onPauseLocal()
-                            val ok = castManager.castTo(d, currentUrl)
-                            emit(castManager.state)
-                            if (!ok) msg = castManager.state.messageOrNull()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(d.friendlyName, color = Fg) }
-            }
-            TextButton(onClick = {
-                scope.launch {
-                    discovering = true
-                    devices = castManager.discoverDevices()
-                    discovering = false
-                    emit(castManager.state)
-                    msg = if (devices.isEmpty()) "未发现设备" else null
+                failMsg != null -> {
+                    Text("投屏失败", color = CastBlock)
+                    Text(failMsg!!, color = Mut, fontSize = 12.sp)
+                    TextButton(onClick = { scope.launch { scan() } }) { Text("重试", color = Acc) }
                 }
-            }) { Text("重新搜索", color = Acc) }
-            Spacer(Modifier.height(24.dp))
+                devices.isEmpty() -> {
+                    Text("未找到可投屏设备", color = Fg, fontSize = 15.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text("请确认电视/盒子与手机在同一 Wi‑Fi，并已开启投屏或 DLNA", color = Mut, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = { scope.launch { scan() } }) {
+                        Text("重新扫描", color = Acc)
+                    }
+                }
+                else -> {
+                    devices.forEach { d ->
+                        val inUse = castManager.currentDevice?.controlUrl == d.controlUrl
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .then(ModifierClick {
+                                    scope.launch {
+                                        if (currentUrl.isNullOrBlank()) {
+                                            failMsg = "当前无播放地址，无法投屏"
+                                            return@launch
+                                        }
+                                        onPauseLocal()
+                                        val ok = castManager.castTo(d, currentUrl)
+                                        emit()
+                                        if (!ok) {
+                                            failMsg = castManager.state.messageOrNull()
+                                                ?: "投屏失败，请重试或换一台设备"
+                                        } else onClose()
+                                    }
+                                }),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Tv, contentDescription = null, tint = Acc)
+                            Spacer(Modifier.width(12.dp))
+                            Text(d.friendlyName, color = Fg, modifier = Modifier.weight(1f))
+                            if (inUse) {
+                                Text(
+                                    "使用中",
+                                    color = Acc,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier
+                                        .background(Acc.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+                    }
+                }
+            }
         }
     }
 }
