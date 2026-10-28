@@ -17,18 +17,15 @@
         android:theme="@style/Theme.Xx9"
         android:usesCleartextTraffic="true">
         <activity
-            android:name=".ServerSetupActivity"
+            android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="false"
-            android:hardwareAccelerated="true" />
     </application>
 </manifest>

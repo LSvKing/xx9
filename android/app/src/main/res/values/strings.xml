@@ -1,10 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">xx9</string>
-    <string name="setup_title">xx9</string>
-    <string name="setup_hint">填写自建服务地址，例如 https://192.168.1.8:8080</string>
-    <string name="setup_base_url">Base URL</string>
-    <string name="setup_save">保存并继续</string>
-    <string name="setup_err_invalid">地址无效，请带上 http:// 或 https://</string>
-    <string name="server_settings">服务器</string>
 </resources>

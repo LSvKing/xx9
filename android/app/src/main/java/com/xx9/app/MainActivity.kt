@@ -1,131 +1,188 @@
 package com.xx9.app
 
-import android.annotation.SuppressLint
-import android.content.Intent
-import android.graphics.Bitmap
 import android.os.Bundle
-import android.view.View
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.ProgressBar
-import androidx.appcompat.app.AppCompatActivity
-import com.xx9.app.cast.AndroidCastSessionLock
-import com.xx9.app.cast.AndroidMulticastLock
-import com.xx9.app.cast.CastJsBridge
-import com.xx9.app.cast.CastManager
-import com.xx9.app.cast.DlnaClient
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.xx9.app.ui.screens.BrowseScreen
+import com.xx9.app.ui.screens.HomeScreen
+import com.xx9.app.ui.screens.PlayerScreen
+import com.xx9.app.ui.screens.SettingsScreen
+import com.xx9.app.ui.screens.SetupScreen
+import com.xx9.app.ui.theme.Acc
+import com.xx9.app.ui.theme.Bg
+import com.xx9.app.ui.theme.Mut
+import com.xx9.app.ui.theme.Xx9Theme
 
-/**
- * 加载已配置 Base URL 的 web/；AMEND-1：带 xx9app=1，前端免密建会话。
- * 投屏：AMEND-2 R1 — MulticastLock + 多 ST + CastState + Transport 轮询；仅 DLNA。
- */
-class MainActivity : AppCompatActivity() {
-    private lateinit var web: WebView
-    private lateinit var loading: ProgressBar
-    private lateinit var castBridge: CastJsBridge
-    private lateinit var castManager: CastManager
-
-    @SuppressLint("SetJavaScriptEnabled")
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val base = Prefs.baseUrl(this)
-        if (base.isEmpty()) {
-            startActivity(Intent(this, ServerSetupActivity::class.java))
-            finish()
-            return
-        }
-
-        setContentView(R.layout.activity_main)
-        web = findViewById(R.id.web)
-        loading = findViewById(R.id.loading)
-
-        val multicast = AndroidMulticastLock(this)
-        val sessionLock = AndroidCastSessionLock(this)
-        val dlna = DlnaClient(multicast)
-        // bridge 需先占位引用；用 lateinit 循环：先建 manager 再 bridge
-        lateinit var bridge: CastJsBridge
-        castManager = CastManager(
-            dlna = dlna,
-            sessionLock = sessionLock,
-            onState = { state -> bridge.notifyState(state) },
-        )
-        bridge = CastJsBridge(this, castManager)
-        castBridge = bridge
-
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
-
-        web.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            mediaPlaybackRequiresUserGesture = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = "$userAgentString xx9-android-app/1.0"
-        }
-        web.addJavascriptInterface(castBridge, CastJsBridge.NAME)
-        web.webChromeClient = WebChromeClient()
-        web.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                loading.visibility = View.VISIBLE
+        enableEdgeToEdge()
+        val app = application as Xx9App
+        setContent {
+            Xx9Theme {
+                Xx9Root(app)
             }
+        }
+    }
+}
 
-            override fun onPageFinished(view: WebView?, url: String?) {
-                loading.visibility = View.GONE
-                view?.evaluateJavascript(
-                    """
-                    (function(){
-                      window.XX9_NATIVE = true;
-                      window.XX9_APP = true;
-                      if (window.xx9CastNativeReady) window.xx9CastNativeReady();
-                      document.addEventListener('click', function(e){
-                        var t = e.target;
-                        if (t && (t.id === 'server-btn' || t.getAttribute('data-xx9-server') === '1')) {
-                          e.preventDefault();
-                          XX9Cast.openServerSetup();
+private data class Tab(val route: String, val label: String, val icon: ImageVector)
+
+@Composable
+private fun Xx9Root(app: Xx9App) {
+    val nav = rememberNavController()
+    var setupDone by remember { mutableStateOf(Prefs.setupDone(app)) }
+    val tabs = listOf(
+        Tab("home", "首页", Icons.Filled.Home),
+        Tab("all", "全部", Icons.Filled.VideoLibrary),
+        Tab("fav", "收藏", Icons.Filled.Favorite),
+        Tab("hist", "历史", Icons.Filled.History),
+        Tab("settings", "设置", Icons.Filled.Settings),
+    )
+    val backStack by nav.currentBackStackEntryAsState()
+    val route = backStack?.destination?.route.orEmpty()
+    val hideBar = !setupDone || route.startsWith("player") || route == "setup" || route.startsWith("theme") || route == "short"
+
+    if (!setupDone) {
+        SetupScreen(initialUrl = Prefs.baseUrl(app)) { url ->
+            Prefs.setBaseUrl(app, url)
+            setupDone = true
+            nav.navigate("home") { popUpTo(0) }
+        }
+        return
+    }
+
+    Scaffold(
+        containerColor = Bg,
+        bottomBar = {
+            if (!hideBar) {
+                NavigationBar(containerColor = Bg) {
+                    tabs.forEach { tab ->
+                        NavigationBarItem(
+                            selected = route == tab.route,
+                            onClick = {
+                                nav.navigate(tab.route) {
+                                    popUpTo("home") { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Acc,
+                                selectedTextColor = Acc,
+                                unselectedIconColor = Mut,
+                                unselectedTextColor = Mut,
+                                indicatorColor = Acc.copy(alpha = 0.15f),
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+    ) { pad ->
+        NavHost(
+            navController = nav,
+            startDestination = "home",
+            modifier = Modifier.padding(pad),
+        ) {
+            composable("home") {
+                HomeScreen(
+                    api = app.api,
+                    onOpenVideo = { nav.navigate("player/$it") },
+                    onOpenTheme = { id, title, source ->
+                        when {
+                            source == "short" -> nav.navigate("short")
+                            id != null && id.toIntOrNull() != null ->
+                                nav.navigate("theme/${id.toInt()}/${android.net.Uri.encode(title)}")
+                            else -> nav.navigate("all")
                         }
-                      }, true);
-                    })();
-                    """.trimIndent(),
-                    null,
+                    },
                 )
             }
-
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                return false
+            composable("all") {
+                BrowseScreen(api = app.api, onOpenVideo = { nav.navigate("player/$it") })
+            }
+            composable("short") {
+                BrowseScreen(
+                    api = app.api,
+                    source = "short",
+                    initialTitle = "短视频",
+                    onOpenVideo = { nav.navigate("player/$it") },
+                )
+            }
+            composable("fav") {
+                BrowseScreen(
+                    api = app.api,
+                    source = "fav",
+                    initialTitle = "收藏",
+                    onOpenVideo = { nav.navigate("player/$it") },
+                )
+            }
+            composable("hist") {
+                BrowseScreen(
+                    api = app.api,
+                    source = "hist",
+                    initialTitle = "历史",
+                    onOpenVideo = { nav.navigate("player/$it") },
+                )
+            }
+            composable("settings") {
+                SettingsScreen(currentUrl = Prefs.baseUrl(app)) { url ->
+                    Prefs.setBaseUrl(app, url)
+                }
+            }
+            composable(
+                "theme/{id}/{title}",
+                arguments = listOf(
+                    navArgument("id") { type = NavType.IntType },
+                    navArgument("title") { type = NavType.StringType },
+                ),
+            ) { entry ->
+                val id = entry.arguments?.getInt("id") ?: 0
+                val title = entry.arguments?.getString("title") ?: "专题"
+                BrowseScreen(
+                    api = app.api,
+                    initialTheme = id,
+                    initialTitle = title,
+                    onOpenVideo = { nav.navigate("player/$it") },
+                )
+            }
+            composable(
+                "player/{id}",
+                arguments = listOf(navArgument("id") { type = NavType.IntType }),
+            ) { entry ->
+                val id = entry.arguments?.getInt("id") ?: return@composable
+                PlayerScreen(videoId = id, api = app.api, onBack = { nav.popBackStack() })
             }
         }
-
-        if (intent.getBooleanExtra(EXTRA_CLEAR_SESSION, false)) {
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
-        }
-
-        web.loadUrl(base.trimEnd('/') + "/?xx9app=1")
-    }
-
-    override fun onDestroy() {
-        if (::castBridge.isInitialized) castBridge.shutdown()
-        if (::web.isInitialized) web.destroy()
-        super.onDestroy()
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (::web.isInitialized && web.canGoBack()) web.goBack() else super.onBackPressed()
-    }
-
-    fun openServerSetup() {
-        startActivity(
-            Intent(this, ServerSetupActivity::class.java)
-                .putExtra(ServerSetupActivity.EXTRA_FORCE, true),
-        )
-    }
-
-    companion object {
-        const val EXTRA_CLEAR_SESSION = "clear_session"
     }
 }

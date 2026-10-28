@@ -1,19 +1,14 @@
-# xx9 Android App（WebView 壳 + DLNA 投屏）
+# xx9 Android（原生）
 
-绑定 cut：`CUT-2026-10-28-app-cast` + `AMEND-1-no-app-login`。
+CUT-2026-10-28-native-android：**Compose 原生 UI**，直调 FastAPI，**禁止** WebView/Capacitor 装 `web/`。
 
-## 行为
-- 首次配置 Base URL → 直接加载 `{base}/?xx9app=1`（**无密码门**）
-- Web 调 `POST /api/app/session`（头 `X-XX9-App: 1`）建会话；浏览器访问仍需 `web_password`
-- 投屏：单一 **DLNA/UPnP AVTransport**（AMEND-2 R1：MulticastLock、多 ST、CastState、Transport 轮询、Pause）
-- **不做** R2 自有 TV / Chromecast / AirPlay
+- 默认 Base URL：`http://49.232.9.67:8000/`（设置可改）
+- 免密：请求头 `X-XX9-App: 1`（后端 `app_open` + `require_auth` 旁路；可选 `/api/app/session`）
+- 播放：Media3 ExoPlayer HLS
+- 投屏：AMEND-2 R1 DLNA（`cast/`，MulticastLock / 多 ST / CastState / 轮询）
 
-## 构建
 ```bash
-cd android
-# 需 Android SDK；设置 ANDROID_HOME
 ./gradlew :app:assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-服务端需部署本分支的 `server.py` / `web/`（含 `/api/app/session` 与投屏 DOM）。
+主交付 APK 文件名建议含 `native`。

@@ -305,9 +305,17 @@ def img_secret():
     return _imgsec["v"]
 
 
+def _app_open() -> bool:
+    return str(c._cfg.get("app_open", True)).lower() not in ("0", "false", "no")
+
+
 def require_auth(request: Request):
-    if not request.session.get("auth"):
-        raise HTTPException(401, "需要登录")
+    """Web: session cookie；App: X-XX9-App:1 信任头（AMEND-1，config.app_open）。"""
+    if request.session.get("auth"):
+        return
+    if _app_open() and request.headers.get("X-XX9-App", "") == "1":
+        return
+    raise HTTPException(401, "需要登录")
 
 
 # 256 张 XOR 映射表（共 64KB），让解密走 bytes.translate 的单次 C 层扫描：
@@ -370,7 +378,7 @@ async def app_session(request: Request):
 
     要求请求头 X-XX9-App: 1；可用 config.app_open=false 关闭（默认开）。
     """
-    if str(c._cfg.get("app_open", True)).lower() in ("0", "false", "no"):
+    if not _app_open():
         raise HTTPException(403, "App 免密未开启")
     if request.headers.get("X-XX9-App", "") != "1":
         raise HTTPException(403, "需要 App 客户端")
