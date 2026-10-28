@@ -197,12 +197,15 @@ fun PlayerScreen(
         applyFullscreenUi(enable)
     }
 
-    // 仅在用户点全屏后生效；离开播放页务必恢复竖屏+系统栏
+    // §0.3：进页默认竖屏，勿自动 immersive；仅 fullscreen=true 时改取向/藏栏
+    DisposableEffect(Unit) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        onDispose { restorePortraitUi() }
+    }
     DisposableEffect(fullscreen, short) {
         if (fullscreen) applyFullscreenUi(true)
-        onDispose {
-            if (fullscreen) restorePortraitUi()
-        }
+        else restorePortraitUi()
+        onDispose { }
     }
 
     val exo = remember {
@@ -313,12 +316,14 @@ fun PlayerScreen(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .navigationBarsPadding()
-                    .padding(12.dp),
+                    .padding(12.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(8.dp)),
             ) {
                 Icon(
                     Icons.Filled.FullscreenExit,
                     contentDescription = "退出全屏",
                     tint = Color.White,
+                    modifier = Modifier.height(24.dp).width(24.dp),
                 )
             }
             IconButton(
@@ -388,18 +393,20 @@ fun PlayerScreen(
                             fullscreen = false,
                             onPlayerView = { playerViewRef = it },
                         )
-                        // 右下角显式全屏按钮（设计官稍后可调位）
+                        // §0.3：播放器 overlay 控制条右下；勿放进 PlayerActions
                         if (!casting) {
                             IconButton(
                                 onClick = { setFullscreen(true) },
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
-                                    .padding(6.dp),
+                                    .padding(8.dp)
+                                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(8.dp)),
                             ) {
                                 Icon(
                                     Icons.Filled.Fullscreen,
                                     contentDescription = "全屏",
                                     tint = Color.White,
+                                    modifier = Modifier.height(24.dp).width(24.dp),
                                 )
                             }
                         }
