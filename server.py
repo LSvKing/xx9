@@ -305,12 +305,25 @@ def img_secret():
     return _imgsec["v"]
 
 
+def _truthy(v, default=False) -> bool:
+    if v is None:
+        return default
+    return str(v).lower() not in ("0", "false", "no", "")
+
+
+def _auth_open() -> bool:
+    """全站免密：config/settings.auth_open=true 时 Web+App 均不需登录。"""
+    return _truthy(c._cfg.get("auth_open"), default=False)
+
+
 def _app_open() -> bool:
-    return str(c._cfg.get("app_open", True)).lower() not in ("0", "false", "no")
+    return _truthy(c._cfg.get("app_open"), default=True)
 
 
 def require_auth(request: Request):
-    """Web: session cookie；App: X-XX9-App:1 信任头（AMEND-1，config.app_open）。"""
+    """鉴权优先级：auth_open 全开 → session → App 信任头(X-XX9-App + app_open)。"""
+    if _auth_open():
+        return
     if request.session.get("auth"):
         return
     if _app_open() and request.headers.get("X-XX9-App", "") == "1":

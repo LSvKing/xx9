@@ -16,8 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * 直调 FastAPI。所有请求带 X-XX9-App:1（免密信任头 / 会话）。
- * 优先 POST /api/app/session 建 cookie；若后端未部署该路由则仅靠信任头（需服务端 require_auth 旁路）。
+ * 直调 FastAPI。请求仍带 X-XX9-App:1（可选旁路）；服务端 auth_open=true 全免密时无需密码、也不依赖该头。
+ * 优先 POST /api/app/session；404/405 忽略。无密码 UI。
  */
 class Xx9Api(private val baseUrlProvider: () -> String) {
     private val jar = object : CookieJar {

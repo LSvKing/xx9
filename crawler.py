@@ -170,7 +170,7 @@ API_PATH = "/fast-endecode/main/request"
 
 # 共享配置(keys/密码)优先从 MySQL settings 表读，覆盖 config.json
 _settings = _load_settings_from_db(MYSQL)
-for _k in ("keys", "web_password", "web_secret"):
+for _k in ("keys", "web_password", "web_secret", "auth_open", "app_open"):
     if _settings.get(_k):
         _cfg[_k] = _settings[_k]
 # 代理配置优先从 MySQL proxy 表读，覆盖 config.json
