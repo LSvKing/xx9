@@ -5,11 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>xx9</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
 </head>
 <body>
-  <!-- 登录遮罩 -->
+  <!-- 服务器配置（DOM A；App 冷启动优先原生页，此处供「服务器」入口） -->
+  <div id="server-setup" class="overlay hidden">
+    <div class="login-box server-box">
+      <h2>xx9</h2>
+      <p class="setup-hint">填写自建服务地址，例如 https://192.168.1.8:8080</p>
+      <input id="base-url" type="url" placeholder="Base URL" autocomplete="url">
+      <button id="server-save">保存并继续</button>
+      <div id="server-err" class="err"></div>
+    </div>
+  </div>
+
+  <!-- 登录遮罩（仅浏览器；App 路径 AMEND-1 跳过） -->
   <div id="login" class="overlay hidden">
     <div class="login-box">
       <h2>xx9</h2>
@@ -35,6 +46,7 @@
       <a data-source="fav">收藏</a>
       <a data-source="hist">历史</a>
     </nav>
+    <button type="button" id="server-btn" class="mut-btn">服务器</button>
     <button id="logout">退出</button>
   </header>
 
@@ -48,12 +60,19 @@
   <!-- 播放器弹层 -->
   <div id="player" class="page hidden">
     <div class="pbar"><button id="close-player" class="back-btn">← 返回</button></div>
+    <div id="cast-banner" class="cast-banner hidden" role="status">
+      <span class="cast-banner-bar"></span>
+      <span id="cast-banner-text" class="cast-banner-text">投屏中</span>
+      <button type="button" id="cast-disconnect" class="cast-disconnect">断开</button>
+    </div>
     <div class="player-box">
       <video id="video" controls playsinline></video>
       <div class="meta">
         <h3 id="p-title"></h3>
         <div class="actions">
           <button id="fav-btn">☆ 收藏</button>
+          <button type="button" id="cast-btn" class="cast-entry" title="投屏"><span class="cast-dot"></span>投屏</button>
+          <button type="button" id="sync-cast-btn" class="hidden">同步到电视</button>
           <a id="dl-btn" href="#">⬇ 下载</a>
           <button id="probe-btn" title="测各国线下载速度，自动切到最快">⚡测速选线</button>
           <select id="line-sel" title="切换线路（卡顿时换一条）"></select>
@@ -64,6 +83,31 @@
     </div>
   </div>
 
-  <script src="app.js?v=2"></script>
+  <!-- 投屏设备 sheet（DOM D） -->
+  <div id="cast-sheet" class="cast-sheet hidden" aria-hidden="true">
+    <div class="cast-sheet-backdrop" id="cast-sheet-backdrop"></div>
+    <div class="cast-sheet-panel">
+      <div class="cast-sheet-stripe"></div>
+      <div class="cast-sheet-head">
+        <div class="cast-sheet-title">投屏到</div>
+        <button type="button" id="cast-refresh" class="cast-icon-btn" title="刷新">↻</button>
+        <button type="button" id="cast-sheet-close" class="cast-icon-btn" title="关闭">✕</button>
+      </div>
+      <div class="cast-sheet-sub">与手机同一 Wi‑Fi</div>
+      <div id="cast-sheet-body" class="cast-sheet-body"></div>
+      <div id="cast-fail" class="cast-fail hidden"></div>
+    </div>
+  </div>
+
+  <!-- 投屏遥控条（DOM E） -->
+  <div id="cast-remote" class="cast-remote hidden">
+    <span class="cast-remote-bar"></span>
+    <button type="button" id="cast-pause" class="cast-remote-btn">暂停</button>
+    <button type="button" id="cast-stop" class="cast-remote-btn">停止投屏</button>
+    <div id="cast-remote-hint" class="cast-remote-hint hidden"></div>
+  </div>
+
+  <script src="cast.js?v=1"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

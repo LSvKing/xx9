@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自建局域网常为 http://IP:port；仅 cleartext，无证书钉扎（私有部署） -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
