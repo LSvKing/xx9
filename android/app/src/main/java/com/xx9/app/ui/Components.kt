@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -328,8 +329,9 @@ fun VideoGrid(
     hasMore: Boolean = false,
     onLoadMore: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    gridState: LazyGridState? = null,
 ) {
-    val state = rememberLazyGridState()
+    val state = gridState ?: rememberLazyGridState()
     if (onLoadMore != null) {
         LaunchedEffect(state, items.size, hasMore) {
             snapshotFlow {

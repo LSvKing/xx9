@@ -31,6 +31,7 @@ import androidx.navigation.navArgument
 import com.xx9.app.ui.MainTabs
 import com.xx9.app.ui.Xx9BottomBar
 import com.xx9.app.ui.Xx9TopBar
+import com.xx9.app.ui.browse.BrowseViewModel
 import com.xx9.app.ui.home.HomeViewModel
 import com.xx9.app.ui.screens.BrowseScreen
 import com.xx9.app.ui.screens.HomeScreen
@@ -90,7 +91,12 @@ private fun Xx9Root(app: Xx9App) {
         Column(Modifier.fillMaxSize().padding(pad)) {
             if (showTopChrome) {
                 Xx9TopBar(
-                    onSearch = { nav.navigate("search") },
+                    onSearch = {
+                        nav.navigate("search") {
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
                     onSettings = { nav.navigate("settings") },
                 )
             }
@@ -123,24 +129,53 @@ private fun Xx9Root(app: Xx9App) {
                         },
                     )
                 }
-                composable("all") {
-                    BrowseScreen(api = app.api, onOpenVideo = { nav.navigate("player/$it") })
-                }
-                composable("fav") {
+                composable(
+                    "all",
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
+                    val browseVm: BrowseViewModel = viewModel(
+                        factory = BrowseViewModel.Factory(app.api, source = "all"),
+                    )
                     BrowseScreen(
                         api = app.api,
-                        source = "fav",
-                        initialTitle = "收藏",
+                        vm = browseVm,
+                        onOpenVideo = { nav.navigate("player/$it") },
+                    )
+                }
+                composable(
+                    "fav",
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
+                    val browseVm: BrowseViewModel = viewModel(
+                        factory = BrowseViewModel.Factory(app.api, source = "fav"),
+                    )
+                    BrowseScreen(
+                        api = app.api,
+                        vm = browseVm,
                         emptyTitle = "还没有收藏",
                         emptySubtitle = "在播放页点☆即可收藏",
                         onOpenVideo = { nav.navigate("player/$it") },
                     )
                 }
-                composable("hist") {
+                composable(
+                    "hist",
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
+                    val browseVm: BrowseViewModel = viewModel(
+                        factory = BrowseViewModel.Factory(app.api, source = "hist"),
+                    )
                     BrowseScreen(
                         api = app.api,
-                        source = "hist",
-                        initialTitle = "历史",
+                        vm = browseVm,
                         emptyTitle = "暂无播放记录",
                         onOpenVideo = { nav.navigate("player/$it") },
                     )
@@ -156,15 +191,23 @@ private fun Xx9Root(app: Xx9App) {
                                 }
                             },
                         )
+                        val browseVm: BrowseViewModel = viewModel(
+                            factory = BrowseViewModel.Factory(app.api, source = "short"),
+                        )
                         BrowseScreen(
                             api = app.api,
-                            source = "short",
-                            initialTitle = "短视频",
+                            vm = browseVm,
                             onOpenVideo = { nav.navigate("player/$it") },
                         )
                     }
                 }
-                composable("search") {
+                composable(
+                    "search",
+                    enterTransition = { EnterTransition.None },
+                    exitTransition = { ExitTransition.None },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { ExitTransition.None },
+                ) {
                     Column {
                         Xx9TopBar(
                             title = "搜索",
@@ -175,9 +218,12 @@ private fun Xx9Root(app: Xx9App) {
                                 }
                             },
                         )
+                        val browseVm: BrowseViewModel = viewModel(
+                            factory = BrowseViewModel.Factory(app.api, forceSearch = true),
+                        )
                         BrowseScreen(
                             api = app.api,
-                            forceSearch = true,
+                            vm = browseVm,
                             emptyTitle = "没有找到相关内容",
                             onOpenVideo = { nav.navigate("player/$it") },
                         )
@@ -221,10 +267,16 @@ private fun Xx9Root(app: Xx9App) {
                                 }
                             },
                         )
+                        val browseVm: BrowseViewModel = viewModel(
+                            factory = BrowseViewModel.Factory(
+                                app.api,
+                                source = "all",
+                                initialTheme = id,
+                            ),
+                        )
                         BrowseScreen(
                             api = app.api,
-                            initialTheme = id,
-                            initialTitle = title,
+                            vm = browseVm,
                             onOpenVideo = { nav.navigate("player/$it") },
                         )
                     }
