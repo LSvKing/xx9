@@ -20,6 +20,9 @@ import java.util.concurrent.TimeUnit
  * 优先 POST /api/app/session；404/405 忽略。无密码 UI。
  */
 class Xx9Api(private val baseUrlProvider: () -> String) {
+    @Volatile var imgSecret: String = "1"
+        private set
+
     private val jar = object : CookieJar {
         private val store = ConcurrentHashMap<String, List<Cookie>>()
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
@@ -48,6 +51,14 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
     fun coverUrl(item: VideoItem): String? =
         absoluteUrl(item.coverLocal) ?: absoluteUrl(item.cover)
 
+    fun coverRequest(item: VideoItem): com.xx9.app.cover.CoverRequest =
+        com.xx9.app.cover.CoverRequest(
+            videoId = item.id,
+            cdnUrl = absoluteUrl(item.cover),
+            proxyUrl = absoluteUrl(item.coverLocal),
+            imgSecret = imgSecret,
+        )
+
     private fun req(path: String): Request.Builder {
         val url = if (path.startsWith("http")) path else base() + path
         return Request.Builder()
@@ -75,11 +86,14 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
                 req("/api/app/session").post("{}".toRequestBody("application/json".toMediaType())),
             )
         }
+        runCatching { me() }
         Unit
     }
 
     suspend fun me(): JSONObject = withContext(Dispatchers.IO) {
-        JSONObject(execute(req("/api/me").get()))
+        val o = JSONObject(execute(req("/api/me").get()))
+        imgSecret = o.optString("img_secret", imgSecret).ifBlank { imgSecret }
+        o
     }
 
     suspend fun home(): List<HomeBlock> = withContext(Dispatchers.IO) {

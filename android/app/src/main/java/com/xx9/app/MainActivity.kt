@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -18,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -27,6 +29,7 @@ import androidx.navigation.navArgument
 import com.xx9.app.ui.MainTabs
 import com.xx9.app.ui.Xx9BottomBar
 import com.xx9.app.ui.Xx9TopBar
+import com.xx9.app.ui.home.HomeViewModel
 import com.xx9.app.ui.screens.BrowseScreen
 import com.xx9.app.ui.screens.HomeScreen
 import com.xx9.app.ui.screens.PlayerScreen
@@ -69,6 +72,7 @@ private fun Xx9Root(app: Xx9App) {
 
     Scaffold(
         containerColor = Bg,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             if (!hideBar) {
                 Xx9BottomBar(currentRoute = route.ifBlank { "home" }) { tab ->
@@ -94,8 +98,12 @@ private fun Xx9Root(app: Xx9App) {
                 modifier = Modifier.fillMaxSize(),
             ) {
                 composable("home") {
+                    val homeVm: HomeViewModel = viewModel(
+                        factory = HomeViewModel.Factory(app.api),
+                    )
                     HomeScreen(
                         api = app.api,
+                        vm = homeVm,
                         onOpenVideo = { nav.navigate("player/$it") },
                         onOpenTheme = { id, title, source ->
                             when {

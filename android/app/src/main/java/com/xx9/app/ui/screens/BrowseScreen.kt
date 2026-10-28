@@ -162,7 +162,7 @@ fun BrowseScreen(
             items.isEmpty() -> EmptyState(emptyTitle, emptySubtitle)
             else -> VideoGrid(
                 items = items,
-                coverOf = { api.coverUrl(it) },
+                coverRequestOf = { api.coverRequest(it) },
                 onClick = { onOpenVideo(it.id) },
                 loadingMore = loadingMore,
                 hasMore = hasMore,

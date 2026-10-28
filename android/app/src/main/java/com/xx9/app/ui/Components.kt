@@ -16,6 +16,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -40,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -53,8 +58,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.request.CachePolicy
 import com.xx9.app.data.MediaRules
 import com.xx9.app.data.VideoItem
+import com.xx9.app.cover.CoverRequest
+import com.xx9.app.cover.CoverCache
 import com.xx9.app.ui.theme.Acc
 import com.xx9.app.ui.theme.AccSoft
 import com.xx9.app.ui.theme.Fg
@@ -83,44 +92,50 @@ fun Xx9TopBar(
     onSettings: (() -> Unit)? = null,
     navigationIcon: @Composable (() -> Unit)? = null,
 ) {
-    Row(
+    // §0.2：statusBars inset 在 56dp 栏身之外，避免与状态栏叠层
+    Column(
         Modifier
             .fillMaxWidth()
-            .height(56.dp)
             .background(Surface)
-            .border(width = 0.dp, color = Line)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .windowInsetsPadding(WindowInsets.statusBars),
     ) {
-        navigationIcon?.invoke()
-        if (showBrand) {
-            BrandMark(Modifier.padding(start = 8.dp))
-        } else if (title != null) {
-            Text(
-                title,
-                color = Fg,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(start = 4.dp),
-            )
-        } else {
-            Spacer(Modifier.weight(1f))
-        }
-        if (showBrand) Spacer(Modifier.weight(1f))
-        if (onSearch != null) {
-            IconButton(onClick = onSearch) {
-                Icon(Icons.Filled.Search, contentDescription = "搜索", tint = Mut)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            navigationIcon?.invoke()
+            if (showBrand) {
+                BrandMark(Modifier.padding(start = 8.dp))
+            } else if (title != null) {
+                Text(
+                    title,
+                    color = Fg,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            if (showBrand) Spacer(Modifier.weight(1f))
+            if (onSearch != null) {
+                IconButton(onClick = onSearch) {
+                    Icon(Icons.Filled.Search, contentDescription = "搜索", tint = Mut)
+                }
+            }
+            if (onSettings != null) {
+                TextButton(onClick = onSettings) {
+                    Text("设置", color = Mut, fontSize = 13.sp)
+                }
             }
         }
-        if (onSettings != null) {
-            TextButton(onClick = onSettings) {
-                Text("设置", color = Mut, fontSize = 13.sp)
-            }
-        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
     }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
 }
 
 data class BottomTab(val route: String, val label: String, val icon: ImageVector)
@@ -134,26 +149,36 @@ val MainTabs = listOf(
 
 @Composable
 fun Xx9BottomBar(currentRoute: String, onSelect: (String) -> Unit) {
-    NavigationBar(
-        containerColor = Surface,
-        tonalElevation = 0.dp,
-        modifier = Modifier.height(56.dp),
+    // §0.2：navigationBars inset 在 56dp 栏身之外，标签不被手势条裁切
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Surface)
+            .windowInsetsPadding(WindowInsets.navigationBars),
     ) {
-        MainTabs.forEach { tab ->
-            val selected = currentRoute == tab.route
-            NavigationBarItem(
-                selected = selected,
-                onClick = { onSelect(tab.route) },
-                icon = { Icon(tab.icon, contentDescription = tab.label) },
-                label = { Text(tab.label, fontSize = 12.sp) },
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = Acc,
-                    selectedTextColor = Acc,
-                    unselectedIconColor = Mut,
-                    unselectedTextColor = Mut,
-                    indicatorColor = AccSoft,
-                ),
-            )
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+        NavigationBar(
+            containerColor = Surface,
+            tonalElevation = 0.dp,
+            modifier = Modifier.height(56.dp),
+            windowInsets = WindowInsets(0, 0, 0, 0),
+        ) {
+            MainTabs.forEach { tab ->
+                val selected = currentRoute == tab.route
+                NavigationBarItem(
+                    selected = selected,
+                    onClick = { onSelect(tab.route) },
+                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                    label = { Text(tab.label, fontSize = 12.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Acc,
+                        selectedTextColor = Acc,
+                        unselectedIconColor = Mut,
+                        unselectedTextColor = Mut,
+                        indicatorColor = AccSoft,
+                    ),
+                )
+            }
         }
     }
 }
@@ -206,13 +231,15 @@ fun LoadingBlock() {
 @Composable
 fun VideoCard(
     item: VideoItem,
-    coverUrl: String?,
+    coverRequest: CoverRequest?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     compactHomeShort: Boolean = false,
+    coverUrl: String? = null, // 兼容旧调用；优先 coverRequest
 ) {
     val short = MediaRules.isShort(item)
     val aspect = MediaRules.coverAspect(item.duration)
+    val ctx = LocalContext.current
     Column(
         modifier
             .clip(RoundedCornerShape(12.dp))
@@ -226,9 +253,22 @@ fun VideoCard(
                 .aspectRatio(aspect)
                 .background(Line),
         ) {
-            if (!coverUrl.isNullOrBlank()) {
+            val model = when {
+                coverRequest != null -> ImageRequest.Builder(ctx)
+                    .data(coverRequest)
+                    .memoryCacheKey("cover-${coverRequest.videoId}")
+                    .diskCacheKey("cover-${coverRequest.videoId}")
+                    .memoryCachePolicy(CachePolicy.ENABLED)
+                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .crossfade(true)
+                    .build()
+                !coverUrl.isNullOrBlank() -> coverUrl
+                else -> null
+            }
+            if (model != null) {
                 AsyncImage(
-                    model = coverUrl,
+                    model = model,
+                    imageLoader = CoverCache.imageLoader(ctx),
                     contentDescription = item.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -282,7 +322,7 @@ fun homeCardWidth(item: VideoItem): Dp =
 @Composable
 fun VideoGrid(
     items: List<VideoItem>,
-    coverOf: (VideoItem) -> String?,
+    coverRequestOf: (VideoItem) -> CoverRequest,
     onClick: (VideoItem) -> Unit,
     loadingMore: Boolean = false,
     hasMore: Boolean = false,
@@ -309,7 +349,7 @@ fun VideoGrid(
         modifier = modifier.fillMaxSize(),
     ) {
         items(items, key = { it.id }) { item ->
-            VideoCard(item, coverOf(item), onClick = { onClick(item) })
+            VideoCard(item = item, coverRequest = coverRequestOf(item), onClick = { onClick(item) })
         }
         if (loadingMore) {
             item { LoadingBlock() }

@@ -16,8 +16,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -173,21 +179,31 @@ fun PlayerScreen(
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
-        Row(
-            Modifier.fillMaxWidth().height(56.dp).background(Surface).padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(Surface)
+                .statusBarsPadding(),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
+                }
+                Text(
+                    detail?.title ?: "播放",
+                    color = Fg,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 16.sp,
+                    modifier = Modifier.weight(1f),
+                )
             }
-            Text(
-                detail?.title ?: "播放",
-                color = Fg,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontSize = 16.sp,
-                modifier = Modifier.weight(1f),
-            )
         }
 
         when {
@@ -217,9 +233,10 @@ fun PlayerScreen(
 
                 Column(
                     Modifier
-                        .weight(1f, fill = false)
+                        .weight(1f, fill = true)
                         .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .then(if (!casting) Modifier.navigationBarsPadding() else Modifier),
                 ) {
                     Text(detail?.title.orEmpty(), color = Fg, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(10.dp))
@@ -313,15 +330,17 @@ private fun PlayerSurface(short: Boolean, casting: Boolean, exo: ExoPlayer) {
     Box(
         Modifier
             .fillMaxWidth()
-            .then(if (short) Modifier.height(420.dp) else Modifier)
+            .then(if (short) Modifier.fillMaxWidth() else Modifier)
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         val boxMod = if (short) {
+            // AMEND-3：短竖居中，限制高度避免顶栏出格后仍撑破屏
             Modifier
                 .widthIn(max = 460.dp)
-                .fillMaxWidth(0.7f)
+                .fillMaxWidth(0.72f)
                 .aspectRatio(9f / 16f)
+                .heightIn(max = 520.dp)
         } else {
             Modifier.fillMaxWidth().aspectRatio(16f / 9f)
         }
@@ -459,6 +478,7 @@ private fun CastRemoteBar(
         Modifier
             .fillMaxWidth()
             .background(CastSoft)
+            .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -523,7 +543,13 @@ fun CastSheet(
             }
         },
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 28.dp),
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("投屏到", color = Fg, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 IconButton(onClick = { scope.launch { scan() } }, enabled = !discovering) {

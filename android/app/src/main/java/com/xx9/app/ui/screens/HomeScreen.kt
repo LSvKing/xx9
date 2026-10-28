@@ -15,21 +15,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.xx9.app.data.ApiException
-import com.xx9.app.data.HomeBlock
 import com.xx9.app.data.Xx9Api
 import com.xx9.app.ui.EmptyState
 import com.xx9.app.ui.ErrorState
 import com.xx9.app.ui.LoadingBlock
 import com.xx9.app.ui.VideoCard
+import com.xx9.app.ui.home.HomeViewModel
 import com.xx9.app.ui.homeCardWidth
 import com.xx9.app.ui.theme.Acc
 import com.xx9.app.ui.theme.Fg
@@ -38,39 +32,23 @@ import com.xx9.app.ui.theme.Mut
 @Composable
 fun HomeScreen(
     api: Xx9Api,
+    vm: HomeViewModel,
     onOpenVideo: (Int) -> Unit,
     onOpenTheme: (id: String?, title: String, source: String?) -> Unit,
 ) {
-    var loading by remember { mutableStateOf(true) }
-    var err by remember { mutableStateOf<String?>(null) }
-    var blocks by remember { mutableStateOf<List<HomeBlock>>(emptyList()) }
-
-    LaunchedEffect(loading) {
-        if (!loading) return@LaunchedEffect
-        runCatching { api.home() }
-            .onSuccess { blocks = it; loading = false; err = null }
-            .onFailure {
-                err = when (it) {
-                    is ApiException -> if (it.code >= 500 || it.code == 0) "无法连接服务器" else "网络异常"
-                    else -> "网络异常"
-                }
-                loading = false
-            }
-    }
-
     when {
-        loading -> LoadingBlock()
-        err != null -> ErrorState(
-            title = err!!,
+        vm.loading && vm.blocks.isEmpty() -> LoadingBlock()
+        vm.err != null && vm.blocks.isEmpty() -> ErrorState(
+            title = vm.err!!,
             subtitle = "请检查网络后重试",
-            onAction = { loading = true },
+            onAction = { vm.refresh(force = true) },
         )
-        blocks.isEmpty() -> EmptyState("暂无专题", "请确认 Base URL 与服务是否可用")
+        vm.blocks.isEmpty() -> EmptyState("暂无专题", "请确认 Base URL 与服务是否可用")
         else -> LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 24.dp),
         ) {
-            items(blocks, key = { "${it.id}-${it.title}" }) { block ->
+            items(vm.blocks, key = { "${it.id}-${it.title}" }) { block ->
                 Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 14.dp),
@@ -95,7 +73,7 @@ fun HomeScreen(
                         block.items.take(12).forEach { item ->
                             VideoCard(
                                 item = item,
-                                coverUrl = api.coverUrl(item),
+                                coverRequest = api.coverRequest(item),
                                 onClick = { onOpenVideo(item.id) },
                                 modifier = Modifier.width(homeCardWidth(item)),
                                 compactHomeShort = true,

@@ -3,6 +3,8 @@ package com.xx9.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,7 +48,7 @@ fun SetupScreen(
     var text by remember { mutableStateOf(if (initialUrl.endsWith("/")) initialUrl else "$initialUrl/") }
     var err by remember { mutableStateOf<String?>(null) }
     Box(
-        Modifier.fillMaxSize().background(Bg),
+        Modifier.fillMaxSize().background(Bg).statusBarsPadding().navigationBarsPadding(),
         contentAlignment = Alignment.Center,
     ) {
         Column(
