@@ -364,6 +364,21 @@ async def logout(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/app/session")
+async def app_session(request: Request):
+    """Android App 免密建会话（AMEND-1）。Web 浏览器仍走 /api/login。
+
+    要求请求头 X-XX9-App: 1；可用 config.app_open=false 关闭（默认开）。
+    """
+    if str(c._cfg.get("app_open", True)).lower() in ("0", "false", "no"):
+        raise HTTPException(403, "App 免密未开启")
+    if request.headers.get("X-XX9-App", "") != "1":
+        raise HTTPException(403, "需要 App 客户端")
+    request.session["auth"] = True
+    request.session["via"] = "app"
+    return {"ok": True}
+
+
 # ============================================================
 # 封面代理（服务端解密，给网页/海阔直接用 <img src>）
 # 不鉴权：只暴露已入库视频的封面，CDN 原图本就可被猜到；避免海阔 img 不带 cookie。

@@ -52,10 +52,47 @@ async function loadCover(img, url, vid) {
   } catch (e) { proxy(); }
 }
 
-// ---------- 登录 ----------
+// ---------- 登录 / App 免密（AMEND-1）----------
+function isXx9App() {
+  try {
+    if (window.XX9_APP || window.XX9_NATIVE) return true;
+    return /(?:^|[?&])xx9app=1(?:&|$)/.test(location.search || '');
+  } catch (e) { return false; }
+}
+
+async function ensureAppSession() {
+  // 壳侧建会话：带 X-XX9-App，Web 浏览器不走此路径
+  const r = await fetch('/api/app/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-XX9-App': '1' },
+    credentials: 'same-origin',
+  });
+  if (!r.ok) throw new Error('App 会话失败');
+}
+
 async function checkAuth() {
+  if (isXx9App()) {
+    $('#login').classList.add('hidden');
+    try {
+      await ensureAppSession();
+    } catch (e) {
+      // 仍尝试 /api/me，避免短暂网络抖动误挡
+    }
+    const r = await api('/api/me').then(r => r.json()).catch(() => ({ auth: false }));
+    imgSecret = r.img_secret || '1';
+    if (r.auth) { init(); return; }
+    // 再试一次建会话
+    try { await ensureAppSession(); } catch (e) {}
+    const r2 = await api('/api/me').then(r => r.json()).catch(() => ({ auth: false }));
+    imgSecret = r2.img_secret || imgSecret;
+    if (r2.auth) { init(); return; }
+    // App 免密失败：不弹密码门，显示状态即可
+    const st = $('#status');
+    if (st) { st.classList.remove('hidden'); st.textContent = '无法连接服务器（App 会话），请检查地址或服务端 app_open'; }
+    return;
+  }
   const r = await api('/api/me').then(r => r.json());
-  imgSecret = r.img_secret || '1';   // 这里就拿到了，init 里不必再请求一次
+  imgSecret = r.img_secret || '1';
   if (r.auth) { $('#login').classList.add('hidden'); init(); }
   else { $('#login').classList.remove('hidden'); }
 }
@@ -67,6 +104,38 @@ async function doLogin() {
 $('#login-btn').onclick = doLogin;
 $('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 $('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
+// 「服务器」：App 走原生设置；浏览器可显示 #server-setup（改的是前端记忆，刷新仍看当前域）
+const serverBtn = $('#server-btn');
+if (serverBtn) {
+  serverBtn.onclick = () => {
+    if (window.XX9Cast && typeof window.XX9Cast.openServerSetup === 'function') {
+      window.XX9Cast.openServerSetup();
+      return;
+    }
+    const box = $('#server-setup');
+    if (box) {
+      box.classList.remove('hidden');
+      const inp = $('#base-url');
+      if (inp) inp.value = location.origin;
+    }
+  };
+}
+const serverSave = $('#server-save');
+if (serverSave) {
+  serverSave.onclick = () => {
+    const raw = ($('#base-url') && $('#base-url').value || '').trim();
+    const err = $('#server-err');
+    if (!/^https?:\/\//i.test(raw)) {
+      if (err) err.textContent = '地址无效，请带上 http:// 或 https://';
+      return;
+    }
+    // 浏览器：只能跳到新源（无法写 App Prefs）
+    location.href = raw.replace(/\/$/, '') + '/';
+  };
+}
+if (isXx9App()) {
+  // App 不显示 Web 退出后的密码门依赖；退出仍清会话但下次冷启动会再走 app/session
+}
 
 // ---------- 列表 ----------
 const fmtDur = (s) => { s = s || 0; const m = Math.floor(s / 60), x = s % 60; return `${m}:${String(x).padStart(2, '0')}`; };
@@ -242,6 +311,7 @@ function playLine(idx, keepTime) {                         // 播指定线路（
   playSource(lineList[idx].url);
   if (keepTime && t > 1) video.addEventListener('loadedmetadata',
     () => { try { video.currentTime = t; } catch (e) {} }, { once: true });
+  if (typeof window.xx9CastOnLineChange === 'function') window.xx9CastOnLineChange();
 }
 
 // ---- 测速选线（手动按钮触发，不自动切，避免误判）----
@@ -373,6 +443,7 @@ function playSource(src) {
 
 function _closePlayer() {
   if ($('#player').classList.contains('hidden')) return;
+  if (typeof window.xx9CastStopIfAny === 'function') window.xx9CastStopIfAny();
   curId = null;
   $('#player').classList.add('hidden');
   video.pause();

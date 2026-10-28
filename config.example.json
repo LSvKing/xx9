@@ -9,6 +9,7 @@
   },
   "web_password": "xx9",
   "web_secret": "change-this-secret",
+  "app_open": true,
   "keys": [
     "6eIZ4cxM5pqzUXcF",
     "84UZNK33cSVylz6Y",
