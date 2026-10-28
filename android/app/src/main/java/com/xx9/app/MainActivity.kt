@@ -13,17 +13,21 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ProgressBar
 import androidx.appcompat.app.AppCompatActivity
+import com.xx9.app.cast.AndroidCastSessionLock
+import com.xx9.app.cast.AndroidMulticastLock
 import com.xx9.app.cast.CastJsBridge
-import com.xx9.app.cast.DlnaController
+import com.xx9.app.cast.CastManager
+import com.xx9.app.cast.DlnaClient
 
 /**
  * 加载已配置 Base URL 的 web/；AMEND-1：带 xx9app=1，前端免密建会话。
- * 投屏经 [CastJsBridge] → DLNA/UPnP AVTransport（单一协议）。
+ * 投屏：AMEND-2 R1 — MulticastLock + 多 ST + CastState + Transport 轮询；仅 DLNA。
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var web: WebView
     private lateinit var loading: ProgressBar
     private lateinit var castBridge: CastJsBridge
+    private lateinit var castManager: CastManager
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,7 +42,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         web = findViewById(R.id.web)
         loading = findViewById(R.id.loading)
-        castBridge = CastJsBridge(this, DlnaController(this))
+
+        val multicast = AndroidMulticastLock(this)
+        val sessionLock = AndroidCastSessionLock(this)
+        val dlna = DlnaClient(multicast)
+        // bridge 需先占位引用；用 lateinit 循环：先建 manager 再 bridge
+        lateinit var bridge: CastJsBridge
+        castManager = CastManager(
+            dlna = dlna,
+            sessionLock = sessionLock,
+            onState = { state -> bridge.notifyState(state) },
+        )
+        bridge = CastJsBridge(this, castManager)
+        castBridge = bridge
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
@@ -59,7 +75,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 loading.visibility = View.GONE
-                // 标记原生桥已就绪（cast.js 轮询）；服务器入口
                 view?.evaluateJavascript(
                     """
                     (function(){
@@ -80,8 +95,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                val u = request?.url ?: return false
-                // 同主机内导航交给 WebView；外链忽略
                 return false
             }
         }
@@ -91,19 +104,18 @@ class MainActivity : AppCompatActivity() {
             CookieManager.getInstance().flush()
         }
 
-        // query 触发 App 免密路径（web/app.js + /api/app/session）
         web.loadUrl(base.trimEnd('/') + "/?xx9app=1")
     }
 
     override fun onDestroy() {
-        castBridge.shutdown()
-        web.destroy()
+        if (::castBridge.isInitialized) castBridge.shutdown()
+        if (::web.isInitialized) web.destroy()
         super.onDestroy()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (web.canGoBack()) web.goBack() else super.onBackPressed()
+        if (::web.isInitialized && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
 
     fun openServerSetup() {

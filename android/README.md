@@ -5,7 +5,8 @@
 ## 行为
 - 首次配置 Base URL → 直接加载 `{base}/?xx9app=1`（**无密码门**）
 - Web 调 `POST /api/app/session`（头 `X-XX9-App: 1`）建会话；浏览器访问仍需 `web_password`
-- 投屏：单一 **DLNA/UPnP AVTransport**，推当前线路 m3u8 URL
+- 投屏：单一 **DLNA/UPnP AVTransport**（AMEND-2 R1：MulticastLock、多 ST、CastState、Transport 轮询、Pause）
+- **不做** R2 自有 TV / Chromecast / AirPlay
 
 ## 构建
 ```bash

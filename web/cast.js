@@ -49,6 +49,40 @@
   };
   window.xx9CastNativeReady = function () { /* MainActivity 注入后可刷新入口态 */ };
 
+  /** 原生 CastState 推送（Discovering/Connecting/Playing/Failed/Idle） */
+  window.xx9CastOnState = function (payload) {
+    const st = payload && payload.state;
+    if (!st || !st.label) return;
+    applyNativeState(st);
+  };
+
+  function applyNativeState(st) {
+    const label = st.label;
+    if (label === 'discovering') {
+      // sheet 内已有 loading；顶条可选
+      return;
+    }
+    if (label === 'connecting') {
+      setBanner('正在投屏至 ' + (st.deviceName || '设备') + '…', true);
+      return;
+    }
+    if (label === 'playing') {
+      casting = casting || { id: '', name: st.deviceName || '设备' };
+      casting.name = st.deviceName || casting.name;
+      enterCastingUi();
+      return;
+    }
+    if (label === 'failed') {
+      // 失败由 play() callback 处理文案；此处若仍显示投屏中则清掉
+      if (casting) clearCastingUi(true);
+      return;
+    }
+    if (label === 'idle') {
+      // 电视侧停 / Stop：≤12s 内离开「投屏中」
+      if (casting) clearCastingUi(true);
+    }
+  }
+
   function showSheet() {
     const el = $('#cast-sheet');
     if (!el) return;
@@ -203,7 +237,8 @@
     lineDirty = false;
     paused = false;
     pauseSupported = true;
-    enterCastingUi();
+    if (r.state) applyNativeState(r.state);
+    else enterCastingUi();
   }
 
   function setBanner(text, connecting) {
