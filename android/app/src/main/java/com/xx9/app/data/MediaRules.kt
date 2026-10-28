@@ -11,6 +11,8 @@ object MediaRules {
 
     fun isShort(detail: VideoDetail): Boolean = isShort(detail.duration)
 
+    fun isShortOrNull(detail: VideoDetail?): Boolean = isShort(detail?.duration)
+
     /** 封面：短 9:16，长 16:10 */
     fun coverAspect(durationSec: Int?): Float =
         if (isShort(durationSec)) 9f / 16f else 16f / 10f

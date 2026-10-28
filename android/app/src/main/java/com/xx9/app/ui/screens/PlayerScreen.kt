@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -141,7 +142,7 @@ fun PlayerScreen(
     DisposableEffect(Unit) { onDispose { exo.release() } }
 
     val lines = detail?.lines.orEmpty()
-    val short = MediaRules.isShort(detail)
+    val short = MediaRules.isShort(detail?.duration)
     val casting = castState is CastState.Playing
 
     LaunchedEffect(detail, lineIndex) {
