@@ -1,6 +1,5 @@
 {
-  "_说明": "config.json 只需 mysql 连接 + 一份回退值。其余配置都走 MySQL 表，程序优先读库、缺了才回退本文件：credentials 表(api域名/token/CDN前缀，fetch_creds.py 写)、settings 表(keys/web_password/web_secret)、proxy 表(住宅代理 get_url/query_url/auth)。",
-
+  "_说明": "config.json 只需 mysql 连接 + 一份回退值。其余配置都走 MySQL 表，程序优先读库、缺了才回退本文件：credentials 表(api域名/token/CDN前缀，fetch_creds.py 写)、settings 表(keys/web_password/web_secret)。",
   "mysql": {
     "host": "localhost",
     "port": 3306,
@@ -8,25 +7,39 @@
     "password": "YOUR_PASSWORD",
     "database": "xx9"
   },
-
   "web_password": "xx9",
   "web_secret": "change-this-secret",
-
   "keys": [
-    "6eIZ4cxM5pqzUXcF", "84UZNK33cSVylz6Y", "jeSWRcTwHyAKwJDB",
-    "i1hvJx9vuRt5zEBS", "1Yy1KOa75R7cnmkg", "4MVTQQAJlMpUIAiL",
-    "T0RVp7KIPamrtQ33", "8HbPxhX6fjhhhwok", "ugvseZc5Kkj8ecmV",
+    "6eIZ4cxM5pqzUXcF",
+    "84UZNK33cSVylz6Y",
+    "jeSWRcTwHyAKwJDB",
+    "i1hvJx9vuRt5zEBS",
+    "1Yy1KOa75R7cnmkg",
+    "4MVTQQAJlMpUIAiL",
+    "T0RVp7KIPamrtQ33",
+    "8HbPxhX6fjhhhwok",
+    "ugvseZc5Kkj8ecmV",
     "G7i3OPcfNhBnAYpc"
   ],
-
   "_scheduler说明": "可选。scheduler.py 的任务表，不写就用内置默认（见 scheduler.py DEFAULT_SCHEDULER）。只覆盖要改的字段即可，jobs 按名浅合并。cron 是标准 5 段「分 时 日 月 周」本地时区。",
   "scheduler": {
-    "run_on_start": ["qg_refresh"],
+    "run_on_start": [],
     "log_dir": "logs",
     "jobs": {
-      "qg_refresh":      { "enabled": true, "cron": "5 0 * * *",    "timeout": 120,  "size": 3 },
-      "creds_refresh":   { "enabled": true, "cron": "13 */6 * * *", "timeout": 300,  "args": [] },
-      "crawler_refresh": { "enabled": true, "cron": "27 */2 * * *", "timeout": 3600, "args": ["--refresh", "--proxy"] }
+      "creds_refresh": {
+        "enabled": true,
+        "cron": "13 */6 * * *",
+        "timeout": 300,
+        "args": []
+      },
+      "crawler_refresh": {
+        "enabled": true,
+        "cron": "27 */2 * * *",
+        "timeout": 3600,
+        "args": [
+          "--refresh"
+        ]
+      }
     }
   }
 }

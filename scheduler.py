@@ -6,9 +6,8 @@ xx9 计划任务调度器 —— 自包含守护进程，可单独部署（海�
 一个长驻进程即可，systemd / docker / nohup 任意方式拉起。
 
 内置任务：
-  qg_refresh      青果住宅 IP 每日重提取：拉满到 size 个，防 0 点失效后当天无可用代理（进程内执行）
   creds_refresh   重跑 fetch_creds.py 刷新 api 域名/jwt/access_token（写 credentials 表），防过期取址失败
-  crawler_refresh crawler.py --refresh 增量爬新片（默认走青果代理绕 WAF 限速）
+  crawler_refresh crawler.py --refresh 增量爬新片
 
 特性：
   - APScheduler CronTrigger：下次触发算出来，DST/边界都交给久经考验的库
@@ -35,7 +34,6 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 import pymysql
-import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -47,15 +45,9 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 # cron：标准 5 段「分 时 日 月 周」，本地时区。错峰挑了非整点的分钟。
 # ============================================================
 DEFAULT_SCHEDULER = {
-    "run_on_start": ["qg_refresh"],       # 启动时立刻补一次青果 IP（刚部署/重启即可用）
+    "run_on_start": [],
     "log_dir": "logs",
     "jobs": {
-        "qg_refresh": {
-            "enabled": True,
-            "cron": "5 0 * * *",          # 每天 0:05（0 点失效后立刻补满）
-            "timeout": 120,
-            "size": 3,                    # 目标 IP 数（= 买的通道数）
-        },
         "creds_refresh": {
             "enabled": True,
             "cron": "13 */6 * * *",       # 每 6 小时
@@ -68,7 +60,7 @@ DEFAULT_SCHEDULER = {
             "enabled": True,
             "cron": "27 */2 * * *",       # 每 2 小时
             "timeout": 3600,
-            "args": ["--refresh", "--proxy"],
+            "args": ["--refresh"],
         },
     },
 }
@@ -111,22 +103,6 @@ def db_conn(mysql_cfg: dict):
     )
 
 
-def load_proxy(cfg: dict):
-    """青果代理配置：优先 MySQL proxy 表（enabled=1 最新一条），回退 config.json 的 proxy 段。"""
-    try:
-        conn = db_conn(cfg["mysql"])
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT get_url, query_url, auth FROM proxy "
-                            "WHERE enabled=1 ORDER BY id DESC LIMIT 1")
-                row = cur.fetchone()
-                if row and row.get("get_url"):
-                    return row
-        finally:
-            conn.close()
-    except Exception:
-        pass
-    return cfg.get("proxy") or {}
 
 
 # ============================================================
@@ -214,37 +190,6 @@ def job_logger(log_dir: str, job: str):
 # ============================================================
 # 任务实现
 # ============================================================
-def run_qg_refresh(cfg, jobcfg, log) -> str:
-    """进程内补满青果 IP。get 每次进一个空闲通道，通道满时返回无害。"""
-    proxy = load_proxy(cfg)
-    get_url = proxy.get("get_url")
-    if not get_url:
-        raise RuntimeError("未配置青果 get_url（proxy 表 / config.json proxy 段都没有）")
-    query_url = proxy.get("query_url")
-    size = int(jobcfg.get("size", 3))
-
-    def servers():
-        if not query_url:
-            return None
-        d = requests.get(query_url, timeout=10).json()
-        return [x.get("server") for x in (d.get("data") or []) if x.get("server")]
-
-    before = servers()
-    need = size if before is None else max(size - len(before), 0)
-    got = 0
-    for _ in range(need):
-        try:
-            requests.get(get_url, timeout=10)
-            got += 1
-        except Exception as e:
-            log.warning(f"get 调用失败：{e}")
-        time.sleep(0.5)
-    after = servers()
-    b = "?" if before is None else len(before)
-    a = "?" if after is None else len(after)
-    msg = f"青果 IP：{b} → {a}（get x{got}）"
-    log.info(msg)
-    return msg
 
 
 def run_subprocess(script: str, args, timeout: int, log) -> str:
@@ -260,9 +205,8 @@ def run_subprocess(script: str, args, timeout: int, log) -> str:
 
 
 JOB_RUNNERS = {
-    "qg_refresh": lambda cfg, jc, log: run_qg_refresh(cfg, jc, log),
     "creds_refresh": lambda cfg, jc, log: run_subprocess("fetch_creds.py", jc.get("args", []), jc.get("timeout", 300), log),
-    "crawler_refresh": lambda cfg, jc, log: run_subprocess("crawler.py", jc.get("args", ["--refresh", "--proxy"]), jc.get("timeout", 3600), log),
+    "crawler_refresh": lambda cfg, jc, log: run_subprocess("crawler.py", jc.get("args", ["--refresh"]), jc.get("timeout", 3600), log),
 }
 
 
