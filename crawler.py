@@ -321,8 +321,9 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     """use_proxy: None=跟随全局 USE_PROXY；True/False=本次强制。
     高频回填走代理轮换绕 WAF；低频的播放取地址传 False 走本机真实 IP，
     独享、不跟回填挤在同一个被限速的住宅 IP 上。
-    解出 code 1034（JwtToken 过期）时自动热重载凭证并重试一次——server.py 长驻
-    进程、批量爬取中途都能据此自愈，不必重启/不必等下一轮 fetch_creds。"""
+    解出 code 1034（JwtToken 过期）或 1019（AccessToken 过期）时自动热重载
+    credentials 并重试一次——server.py 长驻进程、批量爬取中途都能据此自愈，
+    不必重启/不必等下一轮 fetch_creds（仍依赖库里已有新凭证）。"""
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
     bp = json.dumps({"method": method, "params": params or {}, "uri": uri}, separators=(",", ":"))
@@ -343,7 +344,8 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     if "data" not in data or "time" not in data:
         return data
     res = json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
-    if (not _retried and isinstance(res, dict) and res.get("code") == 1034
+    # 1034=JwtToken 过期；1019=AccessToken/上游 Token 过期（运维：与 1034 同走 reload）
+    if (not _retried and isinstance(res, dict) and res.get("code") in (1034, 1019)
             and _maybe_reload_creds()):
         return api_call(uri, method, params, timeout, use_proxy, _retried=True)
     return res
