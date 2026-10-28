@@ -43,6 +43,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
@@ -158,31 +160,7 @@ fun PlayerScreen(
     val short = MediaRules.isShort(detail?.duration)
     val casting = castState is CastState.Playing
     val activity = remember(context) { context.findActivity() }
-    // 全屏：短→竖屏 immersive；长→横屏 immersive；离开恢复竖屏
-    DisposableEffect(detail?.id, short) {
-        val act = activity
-        if (act == null || detail == null) {
-            return@DisposableEffect onDispose { }
-        }
-        val prevOrientation = act.requestedOrientation
-        act.requestedOrientation = if (short) {
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
-        act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-        controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        onDispose {
-            runCatching {
-                act.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                controller.show(WindowInsetsCompat.Type.systemBars())
-                act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            }
-        }
-    }
+    var fullscreen by remember { mutableStateOf(false) }
 
     fun restorePortraitUi() {
         val act = activity ?: return
@@ -191,6 +169,39 @@ fun PlayerScreen(
             val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
             controller.show(WindowInsetsCompat.Type.systemBars())
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
+
+    fun applyFullscreenUi(enable: Boolean) {
+        val act = activity ?: return
+        if (!enable) {
+            restorePortraitUi()
+            return
+        }
+        runCatching {
+            act.requestedOrientation = if (short) {
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            }
+            act.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    fun setFullscreen(enable: Boolean) {
+        fullscreen = enable
+        applyFullscreenUi(enable)
+    }
+
+    // 仅在用户点全屏后生效；离开播放页务必恢复竖屏+系统栏
+    DisposableEffect(fullscreen, short) {
+        if (fullscreen) applyFullscreenUi(true)
+        onDispose {
+            if (fullscreen) restorePortraitUi()
         }
     }
 
@@ -224,6 +235,10 @@ fun PlayerScreen(
     }
 
     fun safeBack() {
+        if (fullscreen) {
+            setFullscreen(false)
+            return
+        }
         teardownPlayback()
         restorePortraitUi()
         onBack()
@@ -270,88 +285,135 @@ fun PlayerScreen(
         exo.playWhenReady = !casting
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        when {
-            loading -> LoadingBlock()
-            err != null -> {
-                Column(Modifier.fillMaxSize().background(Bg)) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .height(56.dp)
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = { safeBack() }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
+    if (fullscreen && !loading && err == null) {
+        // 显式全屏：短竖 immersive / 长横 immersive
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            PlayerSurface(
+                short = short,
+                casting = casting,
+                exo = exo,
+                surfaceVisible = surfaceVisible && !casting,
+                fullscreen = true,
+                onPlayerView = { playerViewRef = it },
+            )
+            if (casting) {
+                CastBanner(
+                    deviceName = (castState as CastState.Playing).deviceName,
+                    onDisconnect = {
+                        scope.launch {
+                            app.castManager.stop()
+                            refreshCast()
+                            exo.playWhenReady = true
                         }
-                        Text("播放", color = Fg, fontSize = 16.sp)
-                    }
-                    ErrorState(err!!, "请确认 Base URL 与服务是否可用", "重试") {
-                        loading = true
-                    }
-                }
-            }
-            else -> {
-                // 全屏画面：短竖 immersive / 长横 immersive（orientation 由 duration 决定）
-                PlayerSurface(
-                    short = short,
-                    casting = casting,
-                    exo = exo,
-                    surfaceVisible = surfaceVisible && !casting,
-                    fullscreen = true,
-                    onPlayerView = { playerViewRef = it },
+                    },
                 )
-                if (casting) {
-                    CastBanner(
-                        deviceName = (castState as CastState.Playing).deviceName,
-                        onDisconnect = {
-                            scope.launch {
-                                app.castManager.stop()
-                                refreshCast()
-                                exo.playWhenReady = true
-                            }
-                        },
+            }
+            IconButton(
+                onClick = { setFullscreen(false) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(12.dp),
+            ) {
+                Icon(
+                    Icons.Filled.FullscreenExit,
+                    contentDescription = "退出全屏",
+                    tint = Color.White,
+                )
+            }
+            IconButton(
+                onClick = { safeBack() },
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(4.dp),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+            }
+        }
+    } else {
+        Column(Modifier.fillMaxSize().background(Bg)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Surface)
+                    .statusBarsPadding(),
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { safeBack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Fg)
+                    }
+                    Text(
+                        detail?.title ?: "播放",
+                        color = Fg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 16.sp,
+                        modifier = Modifier.weight(1f),
                     )
                 }
+            }
 
-                Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.TopStart)
-                            .background(Color.Black.copy(alpha = 0.45f))
-                            .statusBarsPadding(),
-                    ) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(56.dp)
-                                .padding(horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            IconButton(onClick = { safeBack() }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+            when {
+                loading -> LoadingBlock()
+                err != null -> ErrorState(err!!, "请确认 Base URL 与服务是否可用", "重试") {
+                    loading = true
+                }
+                else -> {
+                    if (casting) {
+                        CastBanner(
+                            deviceName = (castState as CastState.Playing).deviceName,
+                            onDisconnect = {
+                                scope.launch {
+                                    app.castManager.stop()
+                                    refreshCast()
+                                    exo.playWhenReady = true
+                                }
+                            },
+                        )
+                    }
+
+                    Box(Modifier.fillMaxWidth()) {
+                        PlayerSurface(
+                            short = short,
+                            casting = casting,
+                            exo = exo,
+                            surfaceVisible = surfaceVisible && !casting,
+                            fullscreen = false,
+                            onPlayerView = { playerViewRef = it },
+                        )
+                        // 右下角显式全屏按钮（设计官稍后可调位）
+                        if (!casting) {
+                            IconButton(
+                                onClick = { setFullscreen(true) },
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(6.dp),
+                            ) {
+                                Icon(
+                                    Icons.Filled.Fullscreen,
+                                    contentDescription = "全屏",
+                                    tint = Color.White,
+                                )
                             }
-                            Text(
-                                detail?.title ?: "播放",
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                fontSize = 16.sp,
-                                modifier = Modifier.weight(1f),
-                            )
                         }
                     }
 
                     Column(
                         Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .background(Color.Black.copy(alpha = 0.55f))
-                            .navigationBarsPadding()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .weight(1f, fill = true)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                            .then(if (!casting) Modifier.navigationBarsPadding() else Modifier),
                     ) {
+                        Text(detail?.title.orEmpty(), color = Fg, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(10.dp))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             itemsIndexed(lines) { idx, ln ->
                                 FilterChip(
@@ -359,10 +421,8 @@ fun PlayerScreen(
                                     onClick = { lineIndex = idx },
                                     label = { Text(ln.name) },
                                     colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = Acc.copy(alpha = 0.25f),
+                                        selectedContainerColor = Acc.copy(alpha = 0.15f),
                                         selectedLabelColor = Acc,
-                                        containerColor = Color.White.copy(alpha = 0.12f),
-                                        labelColor = Color.White,
                                     ),
                                 )
                             }
@@ -379,9 +439,10 @@ fun PlayerScreen(
                         if (lines.isEmpty()) {
                             Spacer(Modifier.height(8.dp))
                             Text("暂无播放线路", color = CastBlock, fontSize = 14.sp)
+                            Text("服务已免密，但取流地址为空。可重试详情或稍后再试。", color = Mut, fontSize = 12.sp)
                             TextButton(onClick = { loading = true }) { Text("重新拉取详情", color = Acc) }
                         }
-                        Spacer(Modifier.height(8.dp))
+                        Spacer(Modifier.height(12.dp))
                         PlayerActions(
                             fav = fav,
                             casting = casting,
@@ -404,21 +465,26 @@ fun PlayerScreen(
                                 }
                             } else null,
                         )
-                        if (casting) {
+                        if (!casting) {
                             Spacer(Modifier.height(8.dp))
-                            CastRemoteBar(
-                                onPause = { scope.launch { app.castManager.pause(); refreshCast() } },
-                                onResume = { scope.launch { app.castManager.resume(); refreshCast() } },
-                                onStop = {
-                                    scope.launch {
-                                        app.castManager.stop()
-                                        refreshCast()
-                                        exo.playWhenReady = true
-                                    }
-                                },
-                            )
+                            Text("点「投屏」选择同一 Wi‑Fi 下的电视 / 盒子 (DLNA)", color = Mut, fontSize = 12.sp)
                         }
                     }
+
+                    if (casting) {
+                        CastRemoteBar(
+                            onPause = { scope.launch { app.castManager.pause(); refreshCast() } },
+                            onResume = { scope.launch { app.castManager.resume(); refreshCast() } },
+                            onStop = {
+                                scope.launch {
+                                    app.castManager.stop()
+                                    refreshCast()
+                                    exo.playWhenReady = true
+                                }
+                            },
+                        )
+                    }
+                }
             }
         }
     }
