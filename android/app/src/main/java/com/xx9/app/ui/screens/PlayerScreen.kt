@@ -110,9 +110,10 @@ fun PlayerScreen(
 
     fun refreshCast() { castState = app.castManager.state }
 
-    LaunchedEffect(videoId) {
-        loading = true
+    LaunchedEffect(videoId, loading) {
+        if (!loading) return@LaunchedEffect
         err = null
+        playErr = null
         runCatching { api.video(videoId) }
             .onSuccess {
                 detail = it
@@ -149,7 +150,7 @@ fun PlayerScreen(
         val url = lines.getOrNull(lineIndex)?.url
         playErr = null
         if (url.isNullOrBlank()) {
-            if (detail != null) playErr = "无可用播放线路"
+            if (detail != null) playErr = "暂无播放地址（线路为空）。可能是上游签址失败，请稍后重试或换片。"
             return@LaunchedEffect
         }
         val factory = DefaultHttpDataSource.Factory()
@@ -233,6 +234,12 @@ fun PlayerScreen(
                                 Text("切换线路", color = Acc)
                             }
                         }
+                    }
+                    if (lines.isEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("暂无播放线路", color = CastBlock, fontSize = 14.sp)
+                        Text("服务已免密，但取流地址为空。可重试详情或稍后再试。", color = Mut, fontSize = 12.sp)
+                        TextButton(onClick = { loading = true }) { Text("重新拉取详情", color = Acc) }
                     }
                     Spacer(Modifier.height(12.dp))
                     PlayerActions(

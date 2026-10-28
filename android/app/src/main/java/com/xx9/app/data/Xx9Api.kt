@@ -29,6 +29,8 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
             store[url.host].orEmpty()
     }
 
+    private val sessionTried = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private val client = OkHttpClient.Builder()
         .cookieJar(jar)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -66,7 +68,8 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
     }
 
     suspend fun ensureSession() = withContext(Dispatchers.IO) {
-        // 尝试 App 会话；405/404 表示旧后端未部署 — 后续靠信任头
+        // auth_open 全开时无需会话；仍尝试一次，失败则不再打
+        if (!sessionTried.compareAndSet(false, true)) return@withContext
         runCatching {
             execute(
                 req("/api/app/session").post("{}".toRequestBody("application/json".toMediaType())),

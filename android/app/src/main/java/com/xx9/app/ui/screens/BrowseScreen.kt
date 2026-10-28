@@ -94,10 +94,9 @@ fun BrowseScreen(
 
     LaunchedEffect(Unit) {
         if (showFilters) runCatching { api.groups() }.onSuccess { groups = it }
-        load(true)
     }
-    LaunchedEffect(sort, group, theme, source) {
-        if (!loading || items.isNotEmpty()) load(true)
+    LaunchedEffect(sort, group, theme, source, forceSearch) {
+        load(true)
     }
 
     Column(Modifier.fillMaxSize()) {

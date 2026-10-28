@@ -12,3 +12,8 @@ CUT-2026-10-28-native-android：**Compose 原生 UI**，直调 FastAPI，**禁�
 ```
 
 主交付 APK 文件名建议含 `native`。
+
+## 联调备注
+
+- 服务端 `auth_open=true` 后无需登录即可调 API。
+- 若 `/api/video/{id}` 的 `lines` 为空，属上游签址/凭证问题，App 会提示重试；非 WebView。
