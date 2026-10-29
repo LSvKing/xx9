@@ -123,7 +123,9 @@ class BrowseViewModel(
                 err = null
                 page = 1
                 if (scrollTop) {
-                    runCatching { gridState.scrollToItem(0) }
+                    // requestScrollToItem 是非挂起 API（登记目标位置）：grid 尚未组合时
+                    // scrollToItem 会 waitForFirstMeasure 永久挂死 —— 搜索页空 items 即中招。
+                    runCatching { gridState.requestScrollToItem(0) }
                 }
             } else {
                 loadingMore = true
