@@ -219,6 +219,7 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
                     duration = o.optInt("duration").takeIf { o.has("duration") && !o.isNull("duration") },
                     author = o.optString("author").takeIf { it.isNotBlank() },
                     readNumber = o.optLong("readNumber").takeIf { o.has("readNumber") },
+                    createTime = o.optLong("createTime", 0).takeIf { it > 0 },
                 ),
             )
         }

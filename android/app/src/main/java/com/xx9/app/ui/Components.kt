@@ -311,6 +311,16 @@ fun VideoCard(
                 modifier = Modifier.padding(horizontal = 8.dp),
             )
         }
+        item.createTime?.takeIf { it > 0 }?.let { ts ->
+            Text(
+                formatDate(ts),
+                color = Mut,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
+        }
         if (compactHomeShort && short) {
             // marker for callers; width applied outside
         }
@@ -371,3 +381,8 @@ fun formatReads(n: Long): String = when {
     n >= 1_000 -> String.format("%.1f千", n / 1_000.0)
     else -> n.toString()
 }
+
+/** 与 web fmtDate 对齐：createTime 为毫秒 epoch → "yyyy-MM-dd HH:mm"。 */
+fun formatDate(ms: Long): String =
+    java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(ms))

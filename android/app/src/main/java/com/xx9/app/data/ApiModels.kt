@@ -8,6 +8,7 @@ data class VideoItem(
     val duration: Int?,
     val author: String?,
     val readNumber: Long?,
+    val createTime: Long?,
 )
 
 data class PlayLine(val name: String, val url: String)
