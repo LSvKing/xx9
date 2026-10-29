@@ -465,7 +465,7 @@ fun PlayerScreen(
                                         val url = lines.getOrNull(lineIndex)?.url
                                         val d = app.castManager.currentDevice
                                         if (url != null && d != null) {
-                                            app.castManager.castTo(d, url)
+                                            app.castManager.castTo(d, videoId, lineIndex, url)
                                             refreshCast()
                                         }
                                     }
@@ -498,6 +498,8 @@ fun PlayerScreen(
 
     if (showCast) {
         CastSheet(
+            videoId = videoId,
+            lineIndex = lineIndex,
             currentUrl = lines.getOrNull(lineIndex)?.url,
             castManager = app.castManager,
             onClose = { refreshCast(); showCast = false },
@@ -715,6 +717,8 @@ private fun RemoteBtn(label: String, onClick: () -> Unit, danger: Boolean = fals
 @kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CastSheet(
+    videoId: Int,
+    lineIndex: Int,
     currentUrl: String?,
     castManager: CastManager,
     onClose: () -> Unit,
@@ -807,7 +811,7 @@ fun CastSheet(
                                             return@launch
                                         }
                                         onPauseLocal()
-                                        val ok = castManager.castTo(d, currentUrl)
+                                        val ok = castManager.castTo(d, videoId, lineIndex, currentUrl)
                                         emit()
                                         if (!ok) {
                                             failMsg = castManager.state.messageOrNull()

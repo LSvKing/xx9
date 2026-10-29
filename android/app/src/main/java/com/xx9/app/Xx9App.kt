@@ -20,6 +20,7 @@ class Xx9App : Application() {
         val sessionLock = AndroidCastSessionLock(this)
         castManager = CastManager(
             dlna = DlnaClient(multicast),
+            api = api,
             sessionLock = sessionLock,
         )
     }

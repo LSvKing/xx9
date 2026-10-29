@@ -1,6 +1,7 @@
 package com.xx9.app.cast
 
 import android.util.Log
+import com.xx9.app.data.Xx9Api
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -11,12 +12,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 投屏编排（对标 hongguo CastManager，精简：无连播 / 无 LocalMediaServer）。
+ * 投屏编排（参考 qinghe：走本机 CastProxy，不直推上游签址）。
  * - 发现 → Connecting → Playing
- * - 4s 轮询 TransportState；电视侧停后 ≤12s（3×4s）离开 Playing
+ * - 4s 轮询 TransportState；电视侧停/ERROR 确认后离开 Playing
+ * - 会话用对象身份识别（`castSession === session`），同设备重投不会让旧 poll 释放新锁
  */
 class CastManager(
     private val dlna: DlnaClient,
+    private val api: Xx9Api,
     private val sessionLock: CastSessionLock? = null,
     private val onState: (CastState) -> Unit = {},
 ) {
@@ -33,6 +36,12 @@ class CastManager(
     @Volatile
     var currentDevice: DlnaDevice? = null
         private set
+
+    /** 当前投屏会话身份 + 代理 token；身份对象本身即判据。 */
+    @Volatile
+    private var castSession: Any? = null
+    @Volatile
+    private var castToken: String? = null
 
     private var pollJob: Job? = null
     private var lastDevices: List<DlnaDevice> = emptyList()
@@ -54,25 +63,40 @@ class CastManager(
             ?: currentDevice?.takeIf { it.id == id || it.controlUrl == id }
 
     /**
-     * 直推当前线路 URL（明文 m3u8/http）。
+     * 经本机 CastProxy 投屏：注册 videoId+lineIndex，电视拉代理 URL，
+     * 签址过期由代理回 /api/video/{vid} 换新重试。
      * @return true 若进入 Playing
      */
-    suspend fun castTo(device: DlnaDevice, mediaUrl: String): Boolean {
+    suspend fun castTo(device: DlnaDevice, videoId: Int, lineIndex: Int, mediaUrl: String): Boolean {
         stopPolling()
+        castSession = null
+        CastProxy.release(castToken)
+        castToken = null
         state = CastState.Connecting(device.friendlyName)
         sessionLock?.acquire()
+
+        val entry = CastProxy.register(videoId, lineIndex, mediaUrl, api)
+        if (entry == null) {
+            sessionLock?.release()
+            state = CastState.Failed("无法建立本机推送服务，请确认手机已连接 Wi‑Fi")
+            return false
+        }
         val ok = withContext(Dispatchers.IO) {
-            runCatching { dlna.play(device, mediaUrl) }.getOrDefault(false)
+            runCatching { dlna.play(device, entry.url) }.getOrDefault(false)
         }
         if (!ok) {
+            CastProxy.release(entry.token)
             sessionLock?.release()
             currentDevice = null
             state = CastState.Failed("${device.friendlyName} 未接受该地址（设备兼容性问题）")
             return false
         }
         currentDevice = device
+        castToken = entry.token
+        val session = Any()
+        castSession = session
         state = CastState.Playing(device.friendlyName)
-        startPolling(device)
+        startPolling(device, session)
         return true
     }
 
@@ -90,10 +114,13 @@ class CastManager(
     suspend fun stop() {
         val d = currentDevice
         stopPolling()
+        castSession = null
         if (d != null) {
             withContext(Dispatchers.IO) { runCatching { dlna.stop(d) } }
         }
         currentDevice = null
+        CastProxy.release(castToken)
+        castToken = null
         sessionLock?.release()
         state = CastState.Idle
     }
@@ -101,7 +128,10 @@ class CastManager(
     fun release() {
         pollJob?.cancel()
         pollJob = null
+        castSession = null
         currentDevice = null
+        CastProxy.release(castToken)
+        castToken = null
         sessionLock?.release()
         state = CastState.Idle
         scope.coroutineContext[Job]?.cancel()
@@ -112,16 +142,17 @@ class CastManager(
         pollJob = null
     }
 
-    private fun startPolling(device: DlnaDevice) {
+    private fun startPolling(device: DlnaDevice, session: Any) {
         stopPolling()
         val tracked = device
+        val token = castToken
         pollJob = scope.launch {
             try {
                 var sawActive = false
                 var consecutiveStopped = 0
                 while (isActive) {
                     delay(STATE_POLL_INTERVAL_MS)
-                    if (currentDevice?.controlUrl != tracked.controlUrl) break
+                    if (castSession !== session) break
                     val transport = withContext(Dispatchers.IO) {
                         runCatching { dlna.transportState(tracked) }.getOrNull()
                     } ?: continue
@@ -132,26 +163,25 @@ class CastManager(
                         consecutiveStopped = 0
                         continue
                     }
-                    if (value !in STOPPED_TRANSPORT_STATES) continue
-                    consecutiveStopped++
-                    if (sawActive) {
-                        // 电视侧停：退出投屏中（不区分片尾/用户停，xx9 无连播）
-                        currentDevice = null
-                        state = CastState.Idle
-                        break
-                    }
-                    // 从未 PLAYING 却持续 STOPPED → ≤12s 清态
-                    if (consecutiveStopped >= STOPPED_CONFIRM_COUNT) {
-                        currentDevice = null
-                        state = CastState.Idle
-                        break
+                    // STOPPED/NO_MEDIA 在播过之后 → 片尾或用户停，立即结束
+                    if (value in STOPPED_TRANSPORT_STATES && sawActive) break
+                    // 从未播过却持续 STOPPED，或 ERROR_OCCURRED（部分机器缓冲/切码率闪报）→ 3 连确认
+                    if (value in STOPPED_TRANSPORT_STATES || value == ERROR_STATE) {
+                        consecutiveStopped++
+                        if (consecutiveStopped >= STOPPED_CONFIRM_COUNT) break
+                    } else {
+                        consecutiveStopped = 0
                     }
                 }
             } finally {
-                if (currentDevice?.controlUrl == tracked.controlUrl) {
+                // 只清自己的会话：重投同设备后，旧 poll 不得动新会话的状态/锁/token
+                if (castSession === session) {
+                    castSession = null
+                    castToken = null
+                    currentDevice = null
+                    CastProxy.release(token)
                     sessionLock?.release()
-                } else if (currentDevice == null) {
-                    sessionLock?.release()
+                    state = CastState.Idle
                 }
             }
         }
@@ -163,5 +193,6 @@ class CastManager(
         const val STOPPED_CONFIRM_COUNT = 3
         val ACTIVE_TRANSPORT_STATES = setOf("PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING")
         val STOPPED_TRANSPORT_STATES = setOf("STOPPED", "NO_MEDIA_PRESENT")
+        const val ERROR_STATE = "ERROR_OCCURRED"
     }
 }
