@@ -929,6 +929,7 @@ def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
         with ThreadPoolExecutor(max_workers=workers) as pool:
             fetched = list(zip(ids, pool.map(_fetch_detail, ids)))
         for vid, data in fetched:
+            # 已拉取但未观察的条目不入库，避免 MAX(id) 越过未写入的 id
             if cur.stop_reason:
                 break
             kind = classify_detail_kind(data)
@@ -955,9 +956,13 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
     """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。
 
     搜索 hint 不可靠：当 hint < 库最大 id 时告警并做有界上探，而不是「无新数据」成功返回。
-    返回退出码：搜索水位异常为 2，其余为 0。
+    返回退出码：搜索水位异常为 2；详情失败（含上探遇错）为 1；否则为 0。
     """
-    hint_max, _hint_ids = get_search_id_hint()
+    try:
+        hint_max, _hint_ids = get_search_id_hint()
+    except Exception as e:
+        print(f"[增量][告警] 搜索 hint 失败: {e}")
+        hint_max, _hint_ids = 0, []
     have = int(db.query("SELECT MAX(id) AS m FROM videos")[0]["m"] or 0)
     plan = plan_refresh(have, hint_max)
     if plan.alert:
@@ -997,7 +1002,11 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
     print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
     if plan.anomaly_exit:
         print(plan.alert or "[增量][告警] 搜索水位异常")
-    return plan.anomaly_exit
+        return plan.anomaly_exit
+    if err > 0:
+        print(f"[增量][告警] 本轮有 {err} 条详情失败，不记为成功")
+        return 1
+    return 0
 
 
 def download_videos(db: DB, workers: int = 3):
