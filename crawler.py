@@ -37,6 +37,7 @@ from refresh_plan import (
     MODE_SEARCH_BEHIND,
     MODE_GAP_TOO_LARGE,
     plan_refresh,
+    effective_refresh_budget,
     parse_search_page_ids,
     classify_detail_kind,
     ProbeCursor,
@@ -952,10 +953,13 @@ def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
     return ok, gap, err, cur.stop_reason
 
 
-def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False) -> int:
+def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False,
+                  limit=None) -> int:
     """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。
 
     搜索 hint 不可靠：当 hint < 库最大 id 时告警并做有界上探，而不是「无新数据」成功返回。
+    limit 为生产定制的本轮条数上限；实际预算 = min(REFRESH_JOB_CAP, limit)（仅合法正整数）。
+    非法 limit 的旧约定未确认前拒绝猜测。未传 limit 时与仓库路径一样只用 REFRESH_JOB_CAP。
     返回退出码：搜索水位异常为 2；详情失败（含上探遇错）为 1；否则为 0。
     """
     try:
@@ -964,7 +968,11 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
         print(f"[增量][告警] 搜索 hint 失败: {e}")
         hint_max, _hint_ids = 0, []
     have = int(db.query("SELECT MAX(id) AS m FROM videos")[0]["m"] or 0)
-    plan = plan_refresh(have, hint_max)
+    budget, limit_err = effective_refresh_budget(limit)
+    if limit_err:
+        print(f"[增量][告警] {limit_err}")
+        return 1
+    plan = plan_refresh(have, hint_max, job_cap=budget)
     if plan.alert:
         print(plan.alert)
 
@@ -981,7 +989,7 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
         print(f"[增量] 库最大 id={have} -> 搜索hint maxId={hint_max} | "
               f"新增 {len(ids)} 个待抓{cap_note}")
         ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
-        rem = REFRESH_JOB_CAP - len(ids)
+        rem = plan.cap - len(ids)
         if rem > 0 and err == 0 and not plan.truncated:
             print(f"[增量] 搜索hint 之后再有界上探（上限 {rem}，连续空洞 {REFRESH_MISS_STREAK} 则停）")
             p_ok, p_gap, p_err, reason = _probe_upward(

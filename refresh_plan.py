@@ -63,6 +63,23 @@ def search_hint_max(page_id_lists: list[list[int]]) -> int:
     return max(flat) if flat else 0
 
 
+
+def effective_refresh_budget(limit, job_cap: int = REFRESH_JOB_CAP):
+    """本轮 id 预算：合法正整数为 min(job_cap, limit)；未传 limit 则只用 job_cap。
+
+    非法/非正 limit 的旧约定必须等生产函数文本确认，这里不猜测（返回 reason）。
+    """
+    if limit is None:
+        return job_cap, None
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return None, f"limit 无法解析为整数，拒绝猜测旧约定（limit={limit!r}）"
+    if n > 0:
+        return min(int(job_cap), n), None
+    return None, f"limit={n} 的旧约定尚未用生产函数文本确认，拒绝猜测"
+
+
 def plan_refresh(have: int, hint_max: int,
                  job_cap: int = REFRESH_JOB_CAP,
                  backfill_gap: int = REFRESH_BACKFILL_GAP,

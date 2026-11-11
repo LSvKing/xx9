@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from refresh_plan import (
+    effective_refresh_budget,
     REFRESH_JOB_CAP,
     REFRESH_MISS_STREAK,
     REFRESH_BACKFILL_GAP,
@@ -174,6 +175,28 @@ class ProbeCursorTests(unittest.TestCase):
         self.assertEqual(len(first), 7)
         self.assertEqual(first[0], 100)
         self.assertEqual(first[-1], 106)
+
+
+class BudgetTests(unittest.TestCase):
+    def test_none_uses_job_cap(self):
+        b, err = effective_refresh_budget(None)
+        self.assertIsNone(err)
+        self.assertEqual(b, REFRESH_JOB_CAP)
+
+    def test_positive_min_with_cap(self):
+        b, err = effective_refresh_budget(100)
+        self.assertIsNone(err)
+        self.assertEqual(b, 100)
+        b, err = effective_refresh_budget(99999)
+        self.assertIsNone(err)
+        self.assertEqual(b, REFRESH_JOB_CAP)
+
+    def test_invalid_not_guessed(self):
+        for val in (0, -1, "nope"):
+            b, err = effective_refresh_budget(val)
+            self.assertIsNone(b)
+            self.assertTrue(err)
+
 
 
 if __name__ == "__main__":

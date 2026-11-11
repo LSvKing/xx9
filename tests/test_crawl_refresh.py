@@ -403,6 +403,33 @@ class CrawlRefreshTests(unittest.TestCase):
         self.assertEqual(len(db.ids), REFRESH_JOB_CAP)
         self.assertEqual(db.have, 50 + REFRESH_JOB_CAP)
 
+    def test_limit_caps_normal_and_skips_tail(self):
+        """生产定制：预算 = min(cap, limit)，且不得再用 2000 去做尾部上探。"""
+        db = FakeDB(have=100)
+        pages = {1: {"data": [{"id": 500}]}}
+
+        def fetch(vid, retries=4):
+            return ok_detail(vid)
+
+        with patch.object(crawler, "api_call", side_effect=self._search(pages)), \
+             patch.object(crawler, "_fetch_detail", side_effect=fetch) as m:
+            code = crawl_refresh(db, workers=1, batch=20, limit=5)
+        self.assertEqual(code, 0)
+        self.assertEqual(inserted_ids(db), [101, 102, 103, 104, 105])
+        self.assertEqual(m.call_count, 5)
+        self.assertEqual(db.have, 105)
+
+    def test_invalid_limit_exits_1_without_fetch(self):
+        db = FakeDB(have=100)
+        pages = {1: {"data": [{"id": 500}]}}
+        with patch.object(crawler, "api_call", side_effect=self._search(pages)), \
+             patch.object(crawler, "_fetch_detail", side_effect=ok_detail) as m:
+            code = crawl_refresh(db, workers=1, batch=20, limit=0)
+        self.assertEqual(code, 1)
+        self.assertEqual(inserted_ids(db), [])
+        self.assertEqual(m.call_count, 0)
+
+
 
 if __name__ == "__main__":
     unittest.main()
