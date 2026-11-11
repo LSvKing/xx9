@@ -912,7 +912,12 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
 def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
                   workers: int, batch: int, verbose: bool = False,
                   label: str = "增量上探"):
-    """从 start 起按 id 递增探活，写入仍存在的详情。受 cap 与连续空洞限制。"""
+    """从 start 起按 id 递增探活，写入仍存在的详情。受 cap 与连续空洞限制。
+
+    workers<=1 时按 id 逐个抓取、判定、立即 flush，失败（详情结果为 str）立刻
+    RuntimeError 停止且零预取，对齐生产 _run_detail_jobs 的立即提交保护。
+    workers>1 时仍用有界分块并发，stop 后未观察的结果不入库。
+    """
     cur = ProbeCursor(start=start, cap=cap, miss_streak=miss_streak)
     ok = gap = err = 0
     det_buf = []
@@ -922,6 +927,41 @@ def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
         if det_buf:
             db.insert_details_batch(det_buf)
             det_buf = []
+
+    def consume(vid, data, immediate: bool) -> str:
+        nonlocal ok, gap, err
+        kind = classify_detail_kind(data)
+        if kind == "ok":
+            ok += 1
+            det_buf.append(data)
+            if immediate or len(det_buf) >= batch:
+                flush()
+        elif kind == "gap":
+            gap += 1
+        else:
+            err += 1
+            if verbose:
+                print(f"\n  ✗ id={vid} 失败: {data if isinstance(data, str) else data.get('code')}",
+                      flush=True)
+        cur.observe(kind)
+        return kind
+
+    if workers <= 1:
+        while True:
+            ids = cur.next_chunk(1)  # 零预取：一次只抓一个 id
+            if not ids:
+                break
+            vid = ids[0]
+            data = _fetch_detail(vid)
+            consume(vid, data, immediate=True)
+            flush()
+            print(f"  [{label}] 已探 {cur.attempted}/{cap} | ok{ok} 空洞{gap} 失败{err}"
+                  f"{'  停止:'+cur.stop_reason if cur.stop_reason else ''}   ", flush=True)
+            if isinstance(data, str):
+                raise RuntimeError(f"{label} 在 id={vid} 失败: {data}")
+            if cur.stop_reason:
+                break
+        return ok, gap, err, cur.stop_reason
 
     while True:
         ids = cur.next_chunk(50)
@@ -933,20 +973,7 @@ def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
             # 已拉取但未观察的条目不入库，避免 MAX(id) 越过未写入的 id
             if cur.stop_reason:
                 break
-            kind = classify_detail_kind(data)
-            if kind == "ok":
-                ok += 1
-                det_buf.append(data)
-                if len(det_buf) >= batch:
-                    flush()
-            elif kind == "gap":
-                gap += 1
-            else:
-                err += 1
-                if verbose:
-                    print(f"\n  ✗ id={vid} 失败: {data if isinstance(data, str) else data.get('code')}",
-                          flush=True)
-            cur.observe(kind)
+            consume(vid, data, immediate=False)
         flush()
         print(f"  [{label}] 已探 {cur.attempted}/{cap} | ok{ok} 空洞{gap} 失败{err}"
               f"{'  停止:'+cur.stop_reason if cur.stop_reason else ''}   ", flush=True)
@@ -983,29 +1010,35 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
         return 0
 
     ok = gap = err = 0
-    if plan.mode == MODE_NORMAL:
-        ids = list(range(plan.start, plan.end + 1))
-        cap_note = f"，本轮封顶到 {plan.end}，下次再续" if plan.truncated else ""
-        print(f"[增量] 库最大 id={have} -> 搜索hint maxId={hint_max} | "
-              f"新增 {len(ids)} 个待抓{cap_note}")
-        ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
-        rem = plan.cap - len(ids)
-        if rem > 0 and err == 0 and not plan.truncated:
-            print(f"[增量] 搜索hint 之后再有界上探（上限 {rem}，连续空洞 {REFRESH_MISS_STREAK} 则停）")
-            p_ok, p_gap, p_err, reason = _probe_upward(
-                db, plan.end + 1, rem, REFRESH_MISS_STREAK,
+    try:
+        if plan.mode == MODE_NORMAL:
+            ids = list(range(plan.start, plan.end + 1))
+            cap_note = f"，本轮封顶到 {plan.end}，下次再续" if plan.truncated else ""
+            print(f"[增量] 库最大 id={have} -> 搜索hint maxId={hint_max} | "
+                  f"新增 {len(ids)} 个待抓{cap_note}")
+            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
+            rem = plan.cap - len(ids)
+            if rem > 0 and err == 0 and not plan.truncated:
+                print(f"[增量] 搜索hint 之后再有界上探（上限 {rem}，连续空洞 {REFRESH_MISS_STREAK} 则停）")
+                p_ok, p_gap, p_err, reason = _probe_upward(
+                    db, plan.end + 1, rem, REFRESH_MISS_STREAK,
+                    workers, batch, verbose, label="增量上探")
+                ok += p_ok; gap += p_gap; err += p_err
+                print(f"[增量] 上探结束 reason={reason}")
+        else:
+            # equal 或 search_behind：不能把 hint 当天花板，从库最大 id 之上有界探活
+            why = "搜索hint等于库最大 id，仍做短上探以免漏更新" if plan.mode == MODE_EQUAL else "搜索hint偏低"
+            print(f"[增量] {why}：从 id={plan.start} 起有界探活"
+                  f"（上限 {plan.cap}，连续空洞 {REFRESH_MISS_STREAK} 则停，搜索hint={hint_max}）")
+            ok, gap, err, reason = _probe_upward(
+                db, plan.start, plan.cap, REFRESH_MISS_STREAK,
                 workers, batch, verbose, label="增量上探")
-            ok += p_ok; gap += p_gap; err += p_err
             print(f"[增量] 上探结束 reason={reason}")
-    else:
-        # equal 或 search_behind：不能把 hint 当天花板，从库最大 id 之上有界探活
-        why = "搜索hint等于库最大 id，仍做短上探以免漏更新" if plan.mode == MODE_EQUAL else "搜索hint偏低"
-        print(f"[增量] {why}：从 id={plan.start} 起有界探活"
-              f"（上限 {plan.cap}，连续空洞 {REFRESH_MISS_STREAK} 则停，搜索hint={hint_max}）")
-        ok, gap, err, reason = _probe_upward(
-            db, plan.start, plan.cap, REFRESH_MISS_STREAK,
-            workers, batch, verbose, label="增量上探")
-        print(f"[增量] 上探结束 reason={reason}")
+
+    except RuntimeError as e:
+        # 对齐生产：workers==1 在失败点立刻停止（已 flush）。在此收下以便返回退出码。
+        print(f"[增量][告警] 在失败点停止: {e}")
+        err = max(err, 1)
 
     print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
     if plan.anomaly_exit:

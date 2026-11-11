@@ -9,6 +9,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pymysql
+from tests import netguard
+netguard.install()
 
 pymysql.connect = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no mysql in tests"))
 
@@ -226,9 +228,11 @@ class ProbeUpwardTests(unittest.TestCase):
         self.assertEqual(inserted_ids(db), [100])
         self.assertEqual(db.have, 100)  # 水位不得跳到 106+
         self.assertNotIn(106, db.ids)
-        # 首块 50 会全部发出，但未观察的结果不入库
-        self.assertEqual(m.call_count, 50)
-        self.assertLessEqual(m.call_count, 80)
+        # workers==1 零预取：只请求 100 + 连续 5 个空洞，106 从未发出
+        fetched = [c.args[0] for c in m.call_args_list]
+        self.assertEqual(fetched, [100, 101, 102, 103, 104, 105])
+        self.assertEqual(m.call_count, 6)
+        self.assertNotIn(106, fetched)
         self.assertEqual(err, 0)
         self.assertEqual(ok, 1)
         self.assertEqual(gap, 5)
@@ -297,11 +301,9 @@ class CrawlRefreshTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(inserted_ids(db), [1741418])
         self.assertEqual(db.have, 1741418)
-        # 1 条成功后需再连续 50 空洞才停；第一块 50 只用掉 49 个空洞，
-        # 第二块会整块发出（最多 50），未观察的不入库。总次数 <= cap。
+        # workers==1：1 条成功后再连续 50 空洞即停，共 51 次，无第二块预取
         self.assertLessEqual(m.call_count, REFRESH_JOB_CAP)
-        self.assertEqual(m.call_count, 100)
-        self.assertGreaterEqual(m.call_count, 1 + REFRESH_MISS_STREAK)
+        self.assertEqual(m.call_count, 1 + REFRESH_MISS_STREAK)
 
     def test_equal_success_exits_0(self):
         db = FakeDB(have=1741417)
@@ -428,6 +430,57 @@ class CrawlRefreshTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(inserted_ids(db), [])
         self.assertEqual(m.call_count, 0)
+
+
+    def test_serial_fail_stops_without_prefetch_and_flushes_immediately(self):
+        """workers==1：每个成功 id 在下一次 fetch 前已入库；str 失败后不再请求后续 id。"""
+        db = FakeDB(have=9)
+        seen = []
+
+        def fetch(vid, retries=4):
+            seen.append(("fetch", vid, frozenset(db.ids)))
+            if vid in (10, 11):
+                return ok_detail(vid)
+            if vid == 12:
+                return "上游1062"
+            return ok_detail(vid)
+
+        orig_insert = db.insert_details_batch
+
+        def tracking_insert(rows):
+            seen.append(("flush", [((r.get("result") or {}).get("vod") or {}).get("id") for r in rows]))
+            return orig_insert(rows)
+
+        db.insert_details_batch = tracking_insert
+
+        with patch.object(crawler, "_fetch_detail", side_effect=fetch) as m:
+            with self.assertRaises(RuntimeError) as ctx:
+                _probe_upward(
+                    db, start=10, cap=40, miss_streak=50,
+                    workers=1, batch=200,
+                )
+        self.assertIn("12", str(ctx.exception))
+        self.assertEqual([c.args[0] for c in m.call_args_list], [10, 11, 12])
+        self.assertNotIn(13, [c.args[0] for c in m.call_args_list])
+        self.assertEqual(inserted_ids(db), [10, 11])
+        self.assertEqual(db.have, 11)
+        # 10 在 fetch(11) 之前已入库
+        fetch_11 = next(s for s in seen if s[0] == "fetch" and s[1] == 11)
+        self.assertIn(10, fetch_11[2])
+        fetch_12 = next(s for s in seen if s[0] == "fetch" and s[1] == 12)
+        self.assertIn(11, fetch_12[2])
+        self.assertEqual([s for s in seen if s[0] == "flush"], [("flush", [10]), ("flush", [11])])
+
+    def test_serial_gaps_do_not_prefetch_beyond_streak(self):
+        db = FakeDB(have=0)
+        with patch.object(crawler, "_fetch_detail", side_effect=lambda vid, retries=4: fat20001()) as m:
+            ok, gap, err, reason = _probe_upward(
+                db, start=1, cap=200, miss_streak=5,
+                workers=1, batch=1,
+            )
+        self.assertEqual(reason, "miss_streak")
+        self.assertEqual(m.call_count, 5)
+        self.assertEqual(inserted_ids(db), [])
 
 
 
