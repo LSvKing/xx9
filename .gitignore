@@ -9,6 +9,9 @@ videos/
 uv.lock
 config.json
 logs/
+.protocol-credentials.json
+.protocol-session.json
+.protocol-request-clock
 output/
 __pycache__/
 *.pyc

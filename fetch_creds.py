@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """
-独立的域名/token 抓取脚本 - 用 Playwright 跑真实 app，捕获当前可用的
-API 域名 + accessToken + jwtToken，写入 MySQL 的 credentials 表。
-
-token 是每次注册轮换的、域名也会变，所以这张表按时间追加历史，
-爬虫读最新一条即可。
+协议凭证刷新。用 credentials 表里最近一条 api/frontend 做基线，
+protocol_auth.bootstrap 注册访客会话，校验搜索和详情后追加写入 credentials，
+并写本地 .protocol-credentials.json（crawler 优先读这个文件）。
 
 用法:
-    uv run python fetch_creds.py                 # 抓一次并写库（默认开 xx9.com/enter）
-    uv run python fetch_creds.py --url https://2fue20zkk5hbe5.xyz/recommend
-    uv run python fetch_creds.py --show          # 打印库里最新一条
-    uv run python fetch_creds.py --sync-config    # 抓取后顺便写回 config.json
-    uv run python fetch_creds.py --headful        # 显示浏览器窗口（调试）
-
-注意: 这些域名在国内需走代理才能连（直连会被 GFW 按 SNI 重置）。
+    uv run python fetch_creds.py              # 刷新并写库
+    uv run python fetch_creds.py --show       # 只打印库里最新一条的时间
+    uv run python fetch_creds.py --sync-config
 """
 import asyncio
 import json
@@ -183,179 +177,29 @@ def fetch_cdn_prefixes(api_base, access_token, jwt_token, origin, keys) -> dict:
         return {}
 
 
-# ============================================================
-# Playwright 抓取
-# ============================================================
-async def capture(url: str, headful: bool, keys: list, dump: bool = False) -> dict:
-    from playwright.async_api import async_playwright
 
-    captured = {"api_base": None, "access_token": None, "jwt_token": None,
-                "origin": None, "final_url": None}
-
-    def _decode(b64: str, ts: int) -> str:
-        """用轮换 keys 解密接口 body（请求/响应同构：{data, time}）"""
-        try:
-            return unpad(AES.new(keys[ts % 10].encode(), AES.MODE_ECB).decrypt(base64.b64decode(b64)), 16).decode("utf-8", "replace")
-        except Exception as e:
-            return f"(解不开: {e})"
-
-    pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=not headful, args=["--ignore-certificate-errors"])
-    ctx = await browser.new_context(ignore_https_errors=True, user_agent=UA, locale="zh-CN",
-                                    viewport={"width": 1440, "height": 900})
-    page = await ctx.new_page()
-
-    def on_request(req):
-        if "fast-endecode" in req.url:
-            if not captured["api_base"]:
-                m = re.match(r"(https?://[^/]+)", req.url)
-                if m:
-                    captured["api_base"] = m.group(1)
-            for h, k in [("accesstoken", "access_token"), ("jwttoken", "jwt_token"), ("origin", "origin")]:
-                v = req.headers.get(h)
-                if v and not captured[k]:
-                    captured[k] = v
-            if dump:                                  # --dump-api：解出请求 body 看 uri/params
-                try:
-                    body = json.loads(req.post_data or "{}")
-                    plain = _decode(body["data"], int(body.get("time", 0))) if "data" in body else req.post_data
-                    print(f"\n[REQ] {req.method} {req.url}\n      acc={req.headers.get('accesstoken','')[:12]} jwt={'有' if req.headers.get('jwttoken') else '无'}\n      body={plain}")
-                except Exception as e:
-                    print(f"[REQ] {req.url}  (body 读取失败: {e})")
-
-    # access_token 不在前几个请求里（要等 user/register/free 之后才带）；
-    # 直接从接口响应里解出 accessToken，最早、最可靠
-    def on_response(resp):
-        if "fast-endecode" not in resp.url:
-            return
-        if captured["access_token"] and not dump:
-            return
-        async def grab():
-            try:
-                j = await resp.json()
-                t = int(j.get("time", 0))
-                raw = unpad(AES.new(keys[t % 10].encode(), AES.MODE_ECB).decrypt(base64.b64decode(j["data"])), 16)
-                if dump:
-                    print(f"[RESP] {resp.url}\n       {raw.decode('utf-8','replace')[:400]}")
-                m = re.search(rb'"accessToken"\s*:\s*"([^"]+)"', raw)
-                if m and not captured["access_token"]:
-                    captured["access_token"] = m.group(1).decode()
-            except Exception:
-                pass
-        asyncio.create_task(grab())
-
-    page.on("request", on_request)
-    page.on("response", on_response)
-
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        pass  # SPA 常超时，忽略，靠下面的等待收集请求
-    # 等齐 api_base + jwt + access_token（access_token 要等注册接口，给足时间）
-    for _ in range(20):
-        await asyncio.sleep(1)
-        if captured["api_base"] and captured["jwt_token"] and captured["access_token"]:
-            break
-    captured["final_url"] = page.url
-
-    await browser.close()
-    await pw.stop()
-    return captured
-
-
+# Protocol bootstrap uses the last discovered API/frontend and validates a detail response.
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default=DEFAULT_URL, help="入口页（默认 xx9.com/enter 永久发布页）")
-    ap.add_argument("--headful", action="store_true", help="显示浏览器窗口")
-    ap.add_argument("--sync-config", action="store_true", help="抓取后写回 config.json")
-    ap.add_argument("--show", action="store_true", help="只打印库里最新一条，不抓取")
-    ap.add_argument("--dump-api", action="store_true", help="调试：打印每个接口的 URI + 解密 body/响应（找注册接口用）")
-    args = ap.parse_args()
-
-    cfg = load_config()
-
+    from protocol_auth import bootstrap, save_local
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--show",action="store_true")
+    ap.add_argument("--sync-config",action="store_true")
+    args=ap.parse_args();cfg=load_config();conn=mysql_conn(cfg)
+    try:previous=latest_creds(conn)
+    finally:conn.close()
+    if not previous:raise RuntimeError("No API/frontend baseline in credentials table")
     if args.show:
-        conn = ensure_table(cfg)
-        row = latest_creds(conn)
-        conn.close()
-        if not row:
-            print("credentials 表为空")
-        else:
-            print("最新凭证:")
-            for k in ["captured_at", "api_base", "frontend", "media_base", "pic_base", "mp4_base", "access_token", "jwt_token", "source_url"]:
-                v = row.get(k)
-                print(f"  {k:<13}: {v}")
-        return
-
-    print(f"打开 {args.url} 抓取域名/token ...")
-    cap = asyncio.run(capture(args.url, args.headful, get_keys(cfg), dump=args.dump_api))
-
-    if not cap["api_base"] or not cap["jwt_token"]:   # 缺域名/jwt 直接失败；access_token 见下
-        print("未捕获到 API 域名/jwt_token，可能原因:")
-        print("  1. 代理未生效（这些域名直连会被重置，需走代理）")
-        print("  2. 入口域名已失效，换一个 --url（或不带 --url 用默认 xx9.com/enter）")
-        print(f"  当前捕获: {cap}")
-        raise SystemExit(1)
-    if not cap["access_token"]:
-        # 运维：上游 register/free 1062 限流时经常抓不到新 access_token。
-        # 禁止写入/复用过期 credentials 行——否则长驻进程 reload 会把过期 token 当「新凭证」，
-        # 详情大批量 1019 空壳被误记成空洞。
-        print("  ✗ access_token 未捕获（可能 register/free 1062 限流）。")
-        print("    拒绝写入 credentials，也不沿用库内旧 token。请稍后再跑或换入口。")
-        print(f"  当前捕获: api_base={cap.get('api_base')!r} jwt={'有' if cap.get('jwt_token') else '无'}")
-        raise SystemExit(2)
-
-    frontend = (cap["origin"] or "").rstrip("/")
-    if not frontend and cap["final_url"]:
-        p = urlparse(cap["final_url"])
-        frontend = f"{p.scheme}://{p.netloc}"
-
-    # 用刚抓到的凭证拉 CDN 前缀（图片/视频/mp4），拉不到则沿用 config
-    cdn = fetch_cdn_prefixes(cap["api_base"], cap["access_token"], cap["jwt_token"],
-                             frontend or cap["api_base"], get_keys(cfg))
-
-    if not cap.get("access_token") or not cap.get("jwt_token") or not cap.get("api_base"):
-        print("  ✗ 凭证不完整，跳过写入 credentials")
-        raise SystemExit(2)
-
-    row = {
-        "api_base": cap["api_base"],
-        "frontend": frontend or None,
-        "media_base": cdn.get("media_base") or cfg.get("media_base"),
-        "pic_base": cdn.get("pic_base") or cfg.get("pic_base"),
-        "mp4_base": cdn.get("mp4_base") or cfg.get("mp4_base"),
-        "access_token": cap["access_token"],
-        "jwt_token": cap["jwt_token"],
-        "source_url": args.url,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    conn = ensure_table(cfg)
-    insert_creds(conn, row)
-    conn.close()
-
-    print("\n已写入 MySQL credentials 表:")
-    print(f"  api_base    : {row['api_base']}")
-    print(f"  frontend    : {row['frontend']}")
-    print(f"  media_base  : {row['media_base']}   (m3u8)")
-    print(f"  pic_base    : {row['pic_base']}   (图片)")
-    print(f"  mp4_base    : {row['mp4_base']}   (mp4)")
-    print(f"  access_token: {row['access_token']}")
-    print(f"  jwt_token   : {row['jwt_token'][:50]}...")
-
+        print("latest credential timestamp:",previous.get("captured_at"));return
+    row=bootstrap(previous,get_keys(cfg))
+    row["captured_at"]=datetime.now(timezone.utc).isoformat()
+    conn=mysql_conn(cfg)
+    try:insert_creds(conn,row)
+    finally:conn.close()
+    save_local(row)
     if args.sync_config:
-        cfg["api_base"] = row["api_base"]
-        if row["frontend"]:
-            cfg["frontend"] = row["frontend"]
-        for k in ("media_base", "pic_base", "mp4_base"):
-            if row[k]:
-                cfg[k] = row[k]
-        cfg["access_token"] = row["access_token"]
-        cfg["jwt_token"] = row["jwt_token"]
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        print("  config.json 已同步")
+        for key in ("access_token","jwt_token","api_base","frontend"):cfg[key]=row[key]
+        with open(CONFIG_PATH,"w") as f:json.dump(cfg,f,ensure_ascii=False,indent=2)
+    print("Protocol session validated against search and detail; credentials committed at",row["captured_at"])
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

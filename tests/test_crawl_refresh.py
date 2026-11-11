@@ -370,11 +370,10 @@ class CrawlRefreshTests(unittest.TestCase):
             code = crawl_refresh(db, workers=1, batch=20)
         self.assertEqual(code, 1)
         self.assertIn(101, db.ids)
-        self.assertIn(103, db.ids)
         self.assertNotIn(102, db.ids)
-        # err>0 不再对 hint 之上上探
-        self.assertLessEqual(max(inserted_ids(db)), 103)
-        self.assertTrue(all(c.args[0] <= 103 for c in m.call_args_list))
+        # workers=1 在失败点停止，不越过断点去写 103，也不再上探
+        self.assertNotIn(103, db.ids)
+        self.assertEqual([c.args[0] for c in m.call_args_list], [101, 102])
 
     def test_empty_search_with_existing_db_exits_2_and_probes(self):
         db = FakeDB(have=1741417)

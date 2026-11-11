@@ -18,30 +18,13 @@ import json
 import base64
 import os
 import re
-import sys
 import time
 import argparse
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-
-from refresh_plan import (
-    SEARCH_HINT_PAGES,
-    SEARCH_HINT_PAGE_SIZE,
-    REFRESH_JOB_CAP,
-    REFRESH_MISS_STREAK,
-    MODE_EMPTY_DB,
-    MODE_NORMAL,
-    MODE_EQUAL,
-    MODE_SEARCH_BEHIND,
-    MODE_GAP_TOO_LARGE,
-    plan_refresh,
-    effective_refresh_budget,
-    parse_search_page_ids,
-    classify_detail_kind,
-    ProbeCursor,
-)
 
 
 def _now_iso() -> str:
@@ -54,6 +37,21 @@ import pymysql
 import pymysql.cursors
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
+from protocol_auth import pace as protocol_pace, UA as PROTOCOL_UA
+from refresh_plan import (
+    SEARCH_HINT_PAGES,
+    SEARCH_HINT_PAGE_SIZE,
+    REFRESH_MISS_STREAK,
+    MODE_EMPTY_DB,
+    MODE_NORMAL,
+    MODE_EQUAL,
+    MODE_GAP_TOO_LARGE,
+    plan_refresh,
+    effective_refresh_budget,
+    parse_search_page_ids,
+    classify_detail_kind,
+    ProbeCursor,
+)
 
 # ============================================================
 # 配置 - 从 config.json 读取，不存在则用默认值
@@ -94,6 +92,14 @@ def _load_config():
 def _load_creds_from_db(mysql_cfg: dict):
     """从 MySQL credentials 表取最新一条域名/token（fetch_creds.py 写入的）。
     取不到（库/表不存在、连不上、表为空）返回 None，调用方回退 config.json。"""
+    local_path = os.path.join(os.path.dirname(__file__), ".protocol-credentials.json")
+    if os.path.exists(local_path):
+        try:
+            with open(local_path) as f: local = json.load(f)
+            if local.get("access_token") and local.get("jwt_token") and local.get("api_base"):
+                return local
+        except (OSError, ValueError):
+            pass
     try:
         conn = pymysql.connect(
             host=mysql_cfg["host"], port=int(mysql_cfg.get("port", 3306)),
@@ -188,7 +194,7 @@ API_PATH = "/fast-endecode/main/request"
 
 # 共享配置(keys/密码)优先从 MySQL settings 表读，覆盖 config.json
 _settings = _load_settings_from_db(MYSQL)
-for _k in ("keys", "web_password", "web_secret", "auth_open", "app_open"):
+for _k in ("keys", "web_password", "web_secret"):
     if _settings.get(_k):
         _cfg[_k] = _settings[_k]
 # 代理配置优先从 MySQL proxy 表读，覆盖 config.json
@@ -221,7 +227,7 @@ else:
 
 
 _last_reload = [0.0]
-_RELOAD_COOLDOWN = 30          # 秒：并发请求里只让一个真去读库重载，避免风暴
+_RELOAD_COOLDOWN = 45          # 秒：并发请求里只让一个真去读库重载，避免风暴
 
 
 def reload_creds() -> bool:
@@ -237,7 +243,7 @@ def reload_creds() -> bool:
         MEDIA_BASE = cr.get("media_base") or MEDIA_BASE
         PIC_BASE = cr.get("pic_base") or PIC_BASE
         MP4_BASE = cr.get("mp4_base") or MP4_BASE
-        # 空串不覆盖：避免 credentials 脏行把仍可用的内存 token 冲掉
+        # d1f04a0: 空串不覆盖，避免脏 credentials 冲掉内存可用 token
         if cr.get("access_token"):
             ACCESS_TOKEN = cr["access_token"]
         if cr.get("jwt_token"):
@@ -247,12 +253,45 @@ def reload_creds() -> bool:
     return False
 
 
-def _maybe_reload_creds() -> bool:
-    """带冷却的凭证重载：距上次重载不足冷却期就不重复读库（并发去重）。"""
-    if time.time() - _last_reload[0] < _RELOAD_COOLDOWN:
+_creds_refresh_lock = threading.Lock()
+
+
+def _run_fetch_creds() -> bool:
+    """同步跑一遍 fetch_creds.py，写新凭证到 DB。成功返回 True。"""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fetch_creds.py")
+    try:
+        print("  [creds] 正在运行 fetch_creds.py 刷新 token ...", flush=True)
+        r = subprocess.run(
+            [os.environ.get("XX9_PYTHON") or sys.executable,
+             script],
+            cwd=os.path.dirname(script),
+            timeout=180,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            print(f"  [creds] fetch_creds 失败 rc={r.returncode}: {(r.stderr or r.stdout or '')[-300:]}", flush=True)
+            return False
+        print("  [creds] fetch_creds 完成", flush=True)
+        return True
+    except Exception as e:
+        print(f"  [creds] fetch_creds 异常: {e}", flush=True)
         return False
-    _last_reload[0] = time.time()
-    return reload_creds()
+
+
+def _maybe_reload_creds(force_fetch: bool = False) -> bool:
+    """带冷却的凭证重载：距上次重载不足冷却期就不重复读库（并发去重）。
+    force_fetch=True 时（如 1019 Token过期）先跑 fetch_creds 再读库。"""
+    if time.time() - _last_reload[0] < _RELOAD_COOLDOWN and not force_fetch:
+        return False
+    with _creds_refresh_lock:
+        # 锁内：若刚有人刷过（含 force_fetch），只读库，避免并发重复跑 Playwright
+        if time.time() - _last_reload[0] < _RELOAD_COOLDOWN:
+            return reload_creds()
+        if force_fetch and not _run_fetch_creds():
+            return False
+        _last_reload[0] = time.time()
+        return reload_creds()
 
 
 class _ProxyPool:
@@ -342,9 +381,9 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     """use_proxy: None=跟随全局 USE_PROXY；True/False=本次强制。
     高频回填走代理轮换绕 WAF；低频的播放取地址传 False 走本机真实 IP，
     独享、不跟回填挤在同一个被限速的住宅 IP 上。
-    解出 code 1034（JwtToken 过期）或 1019（AccessToken 过期）时自动热重载
-    credentials 并重试一次——server.py 长驻进程、批量爬取中途都能据此自愈，
-    不必重启/不必等下一轮 fetch_creds（仍依赖库里已有新凭证）。"""
+    解出 code 1034（JwtToken 过期）或 1019（Token 过期）时自动热重载凭证并重试一次——
+    server.py 长驻进程、批量爬取中途都能据此自愈，不必重启/不必等下一轮 fetch_creds。"""
+    protocol_pace()
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
     bp = json.dumps({"method": method, "params": params or {}, "uri": uri}, separators=(",", ":"))
@@ -353,7 +392,7 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
         "accept": "application/json", "content-type": "application/json",
         "accesstoken": ACCESS_TOKEN, "jwttoken": JWT_TOKEN,
         "origin": FRONTEND,
-        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/147.0.0.0",
+        "user-agent": PROTOCOL_UA,
     }
     want_proxy = USE_PROXY if use_proxy is None else use_proxy
     proxies = _PROXY.get() if (_PROXY and want_proxy) else None
@@ -365,13 +404,19 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
     if "data" not in data or "time" not in data:
         return data
     res = json.loads(aes_dec_auto(data["data"], hint=int(data.get("time", 0))))
-    # 1034=JwtToken 过期；1019=AccessToken/上游 Token 过期 — 与 1034 同走热重载+重试
-    if (not _retried and isinstance(res, dict) and res.get("code") in (1034, 1019)):
-        reloaded = _maybe_reload_creds()
-        if not reloaded:
-            # 冷却期内别的请求可能正在 reload；稍等再用当前全局凭证重试一次
-            time.sleep(0.5)
-        return api_call(uri, method, params, timeout, use_proxy, _retried=True)
+    code = str(res.get("code")) if isinstance(res, dict) else ""
+    # d1f04a0: 1019 与 1034 同走热重载+重试；不 force_fetch（避免连打 register→1036/1062）
+    if code in ("1034", "1019"):
+        if not _retried:
+            reloaded = _maybe_reload_creds(force_fetch=False)
+            if not reloaded:
+                time.sleep(0.5)
+            print(f"  [creds] API code={code} {res.get('message') or res.get('msg') or ''} → 热重载凭证重试", flush=True)
+            return api_call(uri, method, params, timeout, use_proxy, _retried=True)
+        raise Exception(f"Token过期 code={code}")
+    if code == "1062":
+        # 超过限制（频控），不是已删除；抛错让上层退避重试，切勿当空洞
+        raise Exception("超过限制 code=1062")
     return res
 
 
@@ -670,7 +715,7 @@ def get_max_id() -> int:
     return hint
 
 
-def preflight(workers: int = 5, samples: int = 20, min_rate: float = None) -> bool:
+def preflight(workers: int = 1, samples: int = 3, min_rate: float = None) -> bool:
     """开抓前连通性自检：先取 maxId（测搜索接口+token），再并发抓一批样本详情，
     统计成功率。FAT20001（已删除）也算连通成功；只有网络错/超时/非200算失败。
     成功率低于 min_rate 返回 False。走代理时住宅IP本身抖动+爬取有重试，阈值放宽到 40%。"""
@@ -686,7 +731,10 @@ def preflight(workers: int = 5, samples: int = 20, min_rate: float = None) -> bo
 
     def one(v):
         try:
-            api_call(f"cms/vod/detail/{v}", method=1)   # 拿到响应即连通（含 FAT20001）
+            r = api_call(f"cms/vod/detail/{v}", method=1)   # 拿到响应即连通（含已删除）
+            code = str(r.get("code")) if isinstance(r, dict) else ""
+            if code in ("1019", "1034"):
+                return False
             return True
         except Exception:
             return False
@@ -722,10 +770,15 @@ def _err_reason(e) -> str:
         return "连接失败"
     if s.startswith("HTTP "):
         return s[:12]
+    if "Token过期" in s or "1019" in s:
+        return "Token过期"
+    if "超过限制" in s or "1062" in s:
+        return "超过限制"
     return n
 
 
-# 上游鉴权/限流类错误码：详情响应无 vod 时不能记成「空洞」(已删除)
+
+# d1f04a0: 上游鉴权/限流类错误码：详情响应无 vod 时不能记成「空洞」
 _AUTH_FAIL_CODES = {1019, 1034, 1032, 1062}
 
 
@@ -734,12 +787,14 @@ def _detail_fail_reason(data: dict):
     if not isinstance(data, dict):
         return "响应非对象"
     code = data.get("code")
-    if code in _AUTH_FAIL_CODES:
+    try:
+        code_i = int(code) if code is not None and str(code).isdigit() else code
+    except Exception:
+        code_i = code
+    if code_i in _AUTH_FAIL_CODES or code in ("1019", "1034", "1032", "1062"):
         return f"上游{code}"
-    # 显式失败码（非 0 / 非成功），且没有 vod — 不当空洞
     if code not in (None, 0, "0") and not ((data.get("result") or {}).get("vod") or {}).get("id"):
         msg = (data.get("msg") or data.get("message") or "").strip()
-        # FAT20001 = 已删除，仍算空洞（返回 None 让调用方走 gap）
         if "FAT20001" in str(code) or "FAT20001" in msg or "已删除" in msg:
             return None
         if code not in (200, "200"):
@@ -747,9 +802,9 @@ def _detail_fail_reason(data: dict):
     return None
 
 
-def _fetch_detail(vid, retries: int = 4):
+def _fetch_detail(vid, retries: int = 6):
     """抓单条详情，失败重试 + 退避。成功返回 dict；彻底失败返回原因字符串。
-    含 1019/1034 等鉴权失败：不当成功、不记空洞，返回原因供 err 计数。"""
+    1019 Token过期 / 1062 超过限制：刷凭证并加长退避，避免被当成空洞。"""
     reason = "未知"
     for att in range(retries):
         try:
@@ -758,14 +813,23 @@ def _fetch_detail(vid, retries: int = 4):
             if fail:
                 reason = fail
                 if att < retries - 1:
-                    _maybe_reload_creds()
+                    _maybe_reload_creds(force_fetch=False)
                     time.sleep(0.5 * (att + 1))
                     continue
                 return reason
-            return data   # dict = 成功或真实空洞（无 vod.id / FAT20001）
+            return data   # dict = 成功或真实空洞
         except Exception as e:
             reason = _err_reason(e)
-            if att < retries - 1:
+            s = str(e)
+            if "1062" in s or "超过限制" in s:
+                if att >= 1:
+                    return "频控1062：已退避，停止本轮以保留断点"
+                time.sleep(60)  # keep identity; do not re-register to evade a limit
+            elif "1019" in s or "Token过期" in s:
+                # 频控/过期：刷 token，冷却后再试
+                _maybe_reload_creds(force_fetch=True)
+                time.sleep(2.0 + att)
+            elif att < retries - 1:
                 time.sleep(0.5 * (att + 1))   # 0.5/1/1.5s 退避
     return reason   # str = 失败原因
 
@@ -797,7 +861,7 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str, ve
             if verbose:
                 print(f"\n  ✗ id={vid} 失败: {data}", flush=True)
         elif (fail := _detail_fail_reason(data)):
-            # 1019 等鉴权空壳：绝不记「空洞」成功
+            # d1f04a0: 1019 等鉴权空壳：绝不记「空洞」成功
             failed.append(vid)
             reasons[fail] = reasons.get(fail, 0) + 1
             if verbose:
@@ -806,7 +870,7 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str, ve
             ok += 1
             det_buf.append(data)
         else:
-            gap += 1                              # 真空洞：上游确认无此片
+            gap += 1
         if len(det_buf) >= batch:
             flush()
         if show and (done % 100 == 0 or done == total):
@@ -815,6 +879,15 @@ def _run_detail_jobs(db: DB, ids: list, workers: int, batch: int, label: str, ve
             eta = (total - done) / rate if rate > 0 else 0
             print(f"\r  [{label}] {done}/{total} {done*100//max(total,1)}% | "
                   f"ok{ok} 空洞{gap} 失败{len(failed)} | {rate:.1f}/s ETA{eta:.0f}s   ", end="", flush=True)
+
+    if workers == 1:
+        for vid in ids:
+            data = _fetch_detail(vid)
+            consume(vid, data)
+            flush()  # each successful row is durable even if a later request fails
+            if isinstance(data, str):
+                raise RuntimeError(f"id={vid} 未完成：{data}；已提交 {ok} 条，停止避免跳过失败断点")
+        return ok, gap, 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for vid, data in zip(ids, pool.map(_fetch_detail, ids)):
@@ -980,7 +1053,7 @@ def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
     return ok, gap, err, cur.stop_reason
 
 
-def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False,
+def crawl_refresh(db: DB, workers: int = 1, batch: int = 1, verbose: bool = False,
                   limit=None) -> int:
     """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。
 
@@ -1048,6 +1121,8 @@ def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = Fa
         print(f"[增量][告警] 本轮有 {err} 条详情失败，不记为成功")
         return 1
     return 0
+
+
 
 
 def download_videos(db: DB, workers: int = 3):
@@ -1129,12 +1204,14 @@ def main():
     parser.add_argument("--backfill", action="store_true", help="全量回填：枚举 id 从大到小抓全站历史")
     parser.add_argument("--refresh", action="store_true", help="增量：抓比库中最大 id 更新的新视频")
     parser.add_argument("-b", "--batch", type=int, default=200, help="批量写入条数")
-    parser.add_argument("-w", "--workers", type=int, default=5, help="详情/下载并发数")
+    parser.add_argument("-w", "--workers", type=int, default=1, help="详情/下载并发数")
     parser.add_argument("--no-check", action="store_true", help="跳过开抓前连通性自检")
     parser.add_argument("-v", "--verbose", action="store_true", help="逐条打印失败 id 和原因")
     parser.add_argument("--shard", type=str, help="回填分片，格式 k/N，如 3/10 只抓 id%%10==3（多机并行用）")
     parser.add_argument("--proxy", action="store_true", help="走 MySQL proxy 表里的住宅代理（绕 WAF，国内服务器抓取用）")
+    parser.add_argument("--limit", type=int, default=100, help="增量每轮最多处理的 ID 数")
     args = parser.parse_args()
+    if args.limit <= 0: parser.error("--limit 必须大于 0")
 
     global USE_PROXY
     if args.proxy:
@@ -1159,7 +1236,7 @@ def main():
 
         if args.backfill or args.refresh or args.detail:
             if not args.no_check and not preflight(args.workers):
-                return
+                raise RuntimeError("连通性/凭证自检失败，未开始采集，未完成入库")
             if args.backfill:
                 shard = None
                 if args.shard:
@@ -1170,7 +1247,7 @@ def main():
                     shard = (k, n)
                 crawl_backfill(db, args.workers, args.batch, shard=shard, verbose=args.verbose)
             elif args.refresh:
-                code = crawl_refresh(db, args.workers, args.batch, verbose=args.verbose)
+                code = crawl_refresh(db, args.workers, args.batch, verbose=args.verbose, limit=args.limit)
                 if code:
                     sys.exit(code)
             else:

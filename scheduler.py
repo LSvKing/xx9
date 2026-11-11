@@ -199,6 +199,8 @@ def run_subprocess(script: str, args, timeout: int, log) -> str:
     p = subprocess.run(cmd, cwd=BASE_DIR, capture_output=True, text=True, timeout=timeout)
     out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
     tail = out.strip()[-2000:]
+    if p.returncode == 0 and ("成功率过低" in out or "连搜索接口都失败" in out):
+        raise RuntimeError("任务在自检阶段退出，未采集入库\n" + tail)
     if p.returncode != 0:
         raise RuntimeError(f"退出码 {p.returncode}\n{tail}")
     return tail or "(无输出)"
@@ -301,7 +303,7 @@ def main():
                 nx = CronTrigger.from_crontab(j["cron"], timezone=_local_tz()).get_next_fire_time(None, now)
             else:
                 nx = "-"
-            print(f"{n:<16}{en:<6}{j['cron']:<16}{nx}")
+            print(f"{n:<16}{en:<6}{j.get('cron', '-'):<16}{nx}")
         return
 
     if args.status is not None:
