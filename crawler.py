@@ -18,12 +18,30 @@ import json
 import base64
 import os
 import re
+import sys
 import time
 import argparse
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+
+from refresh_plan import (
+    SEARCH_HINT_PAGES,
+    SEARCH_HINT_PAGE_SIZE,
+    REFRESH_JOB_CAP,
+    REFRESH_MISS_STREAK,
+    MODE_EMPTY_DB,
+    MODE_NORMAL,
+    MODE_EQUAL,
+    MODE_SEARCH_BEHIND,
+    MODE_GAP_TOO_LARGE,
+    plan_refresh,
+    effective_refresh_budget,
+    parse_search_page_ids,
+    classify_detail_kind,
+    ProbeCursor,
+)
 
 
 def _now_iso() -> str:
@@ -626,10 +644,30 @@ class DB:
             self._local.conn = None
 
 
+def get_search_id_hint(pages: int = SEARCH_HINT_PAGES,
+                       page_size: int = SEARCH_HINT_PAGE_SIZE):
+    """搜索前几页的 id 集合与其中最大值。
+
+    注意：这不是可靠的全站最大 id。cms/vod/search 按时间倒序，首页可能被
+    置顶/排序打乱，也可能阶段性回到一个更小的 id。只作增量 hint。
+    """
+    found = []
+    for page in range(1, pages + 1):
+        r = api_call("cms/vod/search", method=2,
+                     params={"wd": "", "page": page, "pageSize": page_size})
+        ids = parse_search_page_ids(r)
+        if not ids:
+            break
+        found.extend(ids)
+    return (max(found) if found else 0), found
+
+
 def get_max_id() -> int:
-    """当前站点最大视频 id（搜索第1页第1条，按时间倒序）。"""
-    r = api_call("cms/vod/search", method=2, params={"wd": "", "page": 1, "pageSize": 1})
-    return int(r["data"][0]["id"])
+    """搜索 hint 的最大 id（多页聚合，仍不可当作全站水位）。"""
+    hint, _ = get_search_id_hint()
+    if not hint:
+        raise RuntimeError("搜索未返回任何 id")
+    return hint
 
 
 def preflight(workers: int = 5, samples: int = 20, min_rate: float = None) -> bool:
@@ -871,24 +909,145 @@ def crawl_backfill(db: DB, workers: int = 5, batch: int = 200, chunk: int = 2000
     print(f"[{lbl}] 全部完成! ok{g_ok} 空洞{g_gap} 跳过{g_skip} err{g_err}")
 
 
-def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False):
-    """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。"""
-    max_id = get_max_id()
+def _probe_upward(db: DB, start: int, cap: int, miss_streak: int,
+                  workers: int, batch: int, verbose: bool = False,
+                  label: str = "增量上探"):
+    """从 start 起按 id 递增探活，写入仍存在的详情。受 cap 与连续空洞限制。
+
+    workers<=1 时按 id 逐个抓取、判定、立即 flush，失败（详情结果为 str）立刻
+    RuntimeError 停止且零预取，对齐生产 _run_detail_jobs 的立即提交保护。
+    workers>1 时仍用有界分块并发，stop 后未观察的结果不入库。
+    """
+    cur = ProbeCursor(start=start, cap=cap, miss_streak=miss_streak)
+    ok = gap = err = 0
+    det_buf = []
+
+    def flush():
+        nonlocal det_buf
+        if det_buf:
+            db.insert_details_batch(det_buf)
+            det_buf = []
+
+    def consume(vid, data, immediate: bool) -> str:
+        nonlocal ok, gap, err
+        kind = classify_detail_kind(data)
+        if kind == "ok":
+            ok += 1
+            det_buf.append(data)
+            if immediate or len(det_buf) >= batch:
+                flush()
+        elif kind == "gap":
+            gap += 1
+        else:
+            err += 1
+            if verbose:
+                print(f"\n  ✗ id={vid} 失败: {data if isinstance(data, str) else data.get('code')}",
+                      flush=True)
+        cur.observe(kind)
+        return kind
+
+    if workers <= 1:
+        while True:
+            ids = cur.next_chunk(1)  # 零预取：一次只抓一个 id
+            if not ids:
+                break
+            vid = ids[0]
+            data = _fetch_detail(vid)
+            consume(vid, data, immediate=True)
+            flush()
+            print(f"  [{label}] 已探 {cur.attempted}/{cap} | ok{ok} 空洞{gap} 失败{err}"
+                  f"{'  停止:'+cur.stop_reason if cur.stop_reason else ''}   ", flush=True)
+            if isinstance(data, str):
+                raise RuntimeError(f"{label} 在 id={vid} 失败: {data}")
+            if cur.stop_reason:
+                break
+        return ok, gap, err, cur.stop_reason
+
+    while True:
+        ids = cur.next_chunk(50)
+        if not ids:
+            break
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            fetched = list(zip(ids, pool.map(_fetch_detail, ids)))
+        for vid, data in fetched:
+            # 已拉取但未观察的条目不入库，避免 MAX(id) 越过未写入的 id
+            if cur.stop_reason:
+                break
+            consume(vid, data, immediate=False)
+        flush()
+        print(f"  [{label}] 已探 {cur.attempted}/{cap} | ok{ok} 空洞{gap} 失败{err}"
+              f"{'  停止:'+cur.stop_reason if cur.stop_reason else ''}   ", flush=True)
+    return ok, gap, err, cur.stop_reason
+
+
+def crawl_refresh(db: DB, workers: int = 5, batch: int = 200, verbose: bool = False,
+                  limit=None) -> int:
+    """增量：抓比库中最大 id 更新的部分（新发布的视频，id 更大）。
+
+    搜索 hint 不可靠：当 hint < 库最大 id 时告警并做有界上探，而不是「无新数据」成功返回。
+    limit 为生产定制的本轮条数上限；实际预算 = min(REFRESH_JOB_CAP, limit)（仅合法正整数）。
+    非法 limit 的旧约定未确认前拒绝猜测。未传 limit 时与仓库路径一样只用 REFRESH_JOB_CAP。
+    返回退出码：搜索水位异常为 2；详情失败（含上探遇错）为 1；否则为 0。
+    """
+    try:
+        hint_max, _hint_ids = get_search_id_hint()
+    except Exception as e:
+        print(f"[增量][告警] 搜索 hint 失败: {e}")
+        hint_max, _hint_ids = 0, []
     have = int(db.query("SELECT MAX(id) AS m FROM videos")[0]["m"] or 0)
-    if have == 0:
+    budget, limit_err = effective_refresh_budget(limit)
+    if limit_err:
+        print(f"[增量][告警] {limit_err}")
+        return 1
+    plan = plan_refresh(have, hint_max, job_cap=budget)
+    if plan.alert:
+        print(plan.alert)
+
+    if plan.mode == MODE_EMPTY_DB:
         print("[增量] 库为空，请先跑 --backfill 做全量，再用 --refresh 增量")
-        return
-    if max_id <= have:
-        print(f"[增量] 无新数据（库最大 id={have}, 站点 maxId={max_id}）")
-        return
-    gap = max_id - have
-    if gap > 50000:
-        print(f"[增量] 与站点差距过大（{gap} 个 id），这不是增量场景，请用 --backfill")
-        return
-    ids = list(range(have + 1, max_id + 1))
-    print(f"[增量] 库最大 id={have} -> 站点 maxId={max_id} | 新增 {len(ids)} 个待抓")
-    ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
+        return 0
+    if plan.mode == MODE_GAP_TOO_LARGE:
+        return 0
+
+    ok = gap = err = 0
+    try:
+        if plan.mode == MODE_NORMAL:
+            ids = list(range(plan.start, plan.end + 1))
+            cap_note = f"，本轮封顶到 {plan.end}，下次再续" if plan.truncated else ""
+            print(f"[增量] 库最大 id={have} -> 搜索hint maxId={hint_max} | "
+                  f"新增 {len(ids)} 个待抓{cap_note}")
+            ok, gap, err = _run_detail_jobs(db, ids, workers, batch, label="增量", verbose=verbose)
+            rem = plan.cap - len(ids)
+            if rem > 0 and err == 0 and not plan.truncated:
+                print(f"[增量] 搜索hint 之后再有界上探（上限 {rem}，连续空洞 {REFRESH_MISS_STREAK} 则停）")
+                p_ok, p_gap, p_err, reason = _probe_upward(
+                    db, plan.end + 1, rem, REFRESH_MISS_STREAK,
+                    workers, batch, verbose, label="增量上探")
+                ok += p_ok; gap += p_gap; err += p_err
+                print(f"[增量] 上探结束 reason={reason}")
+        else:
+            # equal 或 search_behind：不能把 hint 当天花板，从库最大 id 之上有界探活
+            why = "搜索hint等于库最大 id，仍做短上探以免漏更新" if plan.mode == MODE_EQUAL else "搜索hint偏低"
+            print(f"[增量] {why}：从 id={plan.start} 起有界探活"
+                  f"（上限 {plan.cap}，连续空洞 {REFRESH_MISS_STREAK} 则停，搜索hint={hint_max}）")
+            ok, gap, err, reason = _probe_upward(
+                db, plan.start, plan.cap, REFRESH_MISS_STREAK,
+                workers, batch, verbose, label="增量上探")
+            print(f"[增量] 上探结束 reason={reason}")
+
+    except RuntimeError as e:
+        # 对齐生产：workers==1 在失败点立刻停止（已 flush）。在此收下以便返回退出码。
+        print(f"[增量][告警] 在失败点停止: {e}")
+        err = max(err, 1)
+
     print(f"[增量] 完成! ok{ok} 空洞{gap} err{err} | items={db.count_items()}")
+    if plan.anomaly_exit:
+        print(plan.alert or "[增量][告警] 搜索水位异常")
+        return plan.anomaly_exit
+    if err > 0:
+        print(f"[增量][告警] 本轮有 {err} 条详情失败，不记为成功")
+        return 1
+    return 0
 
 
 def download_videos(db: DB, workers: int = 3):
@@ -1011,7 +1170,9 @@ def main():
                     shard = (k, n)
                 crawl_backfill(db, args.workers, args.batch, shard=shard, verbose=args.verbose)
             elif args.refresh:
-                crawl_refresh(db, args.workers, args.batch, verbose=args.verbose)
+                code = crawl_refresh(db, args.workers, args.batch, verbose=args.verbose)
+                if code:
+                    sys.exit(code)
             else:
                 crawl_details(db, "__all__", args.workers, args.batch, verbose=args.verbose)
             return
