@@ -6,14 +6,30 @@ const api = (p, opts) => fetch(p, Object.assign({ headers: { 'Content-Type': 'ap
 const state = { q: '', group: 0, theme: 0, sort: 'new', source: 'all', page: 1, loading: false, end: false };
 let imgSecret = '1';   // 图片是否 XOR 加密（从 /api/me 取）
 
-// 封面懒加载：进视口才拉，加密则 fetch+XOR 解密成 blob
+// 封面懒加载：进视口才拉。
+// 加密图优先浏览器直连 CDN + 前端 XOR；失败/超时再走后端 /api/cover 解密代理。
+// 关键并发闸门：一屏 30 张同时 decrypt 会把主线程打满，后半截卡片长期空白。
+const COVER_CONCURRENCY = 6;
+let _coverActive = 0;
+const _coverWait = [];
+// 有空位立刻 +1；满了排队，释放时把名额直接转给队头（不再 -1+1）
+const _takeCoverSlot = () => new Promise((resolve) => {
+  if (_coverActive < COVER_CONCURRENCY) { _coverActive++; resolve(); }
+  else _coverWait.push(resolve);
+});
+const _releaseCoverSlot = () => {
+  const next = _coverWait.shift();
+  if (next) next();                         // 名额转给等待者
+  else _coverActive = Math.max(0, _coverActive - 1);
+};
+
 const io = new IntersectionObserver((entries) => {
   for (const e of entries) {
     if (!e.isIntersecting) continue;
     io.unobserve(e.target);
     loadCover(e.target, e.target.dataset.cover, e.target.dataset.vid);
   }
-}, { rootMargin: '400px' });
+}, { rootMargin: '600px' });
 
 // 解出来的字节按魔数认类型：blob: 的 <img> 认 Blob 的 type，写死一种会挑食
 function sniffMime(b) {
@@ -25,31 +41,102 @@ function sniffMime(b) {
   return 'image/jpeg';
 }
 
-async function loadCover(img, url, vid) {
-  if (!url && !vid) return;
-  // 兜底：后端解密代理（图片域名刚轮换时它会强制重探活域名，自愈比前端快）
-  const proxy = () => {
-    if (!vid) { img.style.opacity = 0.2; return; }
-    img.src = '/api/cover/' + vid;
-    img.onerror = () => { img.style.opacity = 0.2; };
+function xorDecrypt(buf) {
+  // 首字节 key，其余 XOR 后丢掉首字节；用 slice 拷出 body，避免 subarray 共享大缓冲
+  const k = buf[0];
+  const body = buf.slice(1);
+  const n = body.length;
+  let i = 0;
+  for (; i + 8 <= n; i += 8) {
+    body[i] ^= k; body[i + 1] ^= k; body[i + 2] ^= k; body[i + 3] ^= k;
+    body[i + 4] ^= k; body[i + 5] ^= k; body[i + 6] ^= k; body[i + 7] ^= k;
+  }
+  for (; i < n; i++) body[i] ^= k;
+  return body;
+}
+
+function showCoverFail(img) {
+  img.dataset.cs = 'err';
+  img.style.opacity = '0.2';
+}
+
+function showCoverProxy(img, vid) {
+  if (!vid) { showCoverFail(img); return; }
+  img.dataset.cs = 'proxy';
+  img.onload = () => {
+    img.dataset.cs = 'ok';
+    img.style.removeProperty('opacity');
   };
-  if (!url) return proxy();
-  if (imgSecret !== '1') { img.src = url; img.onerror = proxy; return; }
-  // 默认直连 CDN 自己解：封面平均 240KB，走后端代理要多绕一趟 VPS，而且和 /api 同源
-  // 抢那 6 条并发，滚长列表时排队很明显。CDN 是独立源、CORS 全开，能吃满并发。
+  img.onerror = () => showCoverFail(img);
+  // 已解密的同源图，浏览器原生并发/缓存更稳，不占 JS 主线程
+  img.src = '/api/cover/' + vid;
+}
+
+async function loadCover(img, url, vid) {
+  if (!img || (!url && !vid)) return;
+  // 避免同一节点重复进队（reset 后是新节点，不受影响）
+  if (img.dataset.cs === 'ok' || img.dataset.cs === 'loading' || img.dataset.cs === 'proxy') return;
+  img.dataset.cs = 'loading';
+
+  // 未加密：直接 <img src>
+  if (imgSecret !== '1') {
+    if (url) {
+      img.onload = () => { img.dataset.cs = 'ok'; img.style.removeProperty('opacity'); };
+      img.onerror = () => showCoverProxy(img, vid);
+      img.src = url;
+    } else {
+      showCoverProxy(img, vid);
+    }
+    return;
+  }
+
+  // 无 CDN 地址 → 只能走代理
+  if (!url) { showCoverProxy(img, vid); return; }
+
+  // 加密：限并发直连 CDN 解密；超时/失败/节点已卸 → 代理
+  await _takeCoverSlot();
   try {
-    const r = await fetch(url);
-    if (!r.ok) return proxy();                          // 域名刚轮换会回错误页，fetch 本身不抛
+    if (!img.isConnected) return;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    let r;
+    try {
+      r = await fetch(url, { signal: ctrl.signal, mode: 'cors', credentials: 'omit' });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!img.isConnected) return;
+    if (!r.ok) { showCoverProxy(img, vid); return; }
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (buf.length < 2) return proxy();
-    const k = buf[0];
-    for (let i = 1; i < buf.length; i++) buf[i] ^= k;   // 每字节 XOR 首字节
-    const body = buf.subarray(1);                       // 丢首字节
+    if (!img.isConnected) return;
+    if (buf.length < 2) { showCoverProxy(img, vid); return; }
+    const body = xorDecrypt(buf);
     const u = URL.createObjectURL(new Blob([body], { type: sniffMime(body) }));
-    img.onload = () => URL.revokeObjectURL(u);          // 滚长列表别把 blob 全囤着
-    img.onerror = () => { URL.revokeObjectURL(u); proxy(); };   // 解出来不是图 → 退回代理
-    img.src = u;
-  } catch (e) { proxy(); }
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = (fn) => {
+        if (settled) return;
+        settled = true;
+        fn();
+        resolve();
+      };
+      // 延迟 revoke：部分 WebKit 在 onload 里立刻 revoke 会让图空白
+      img.onload = () => finish(() => {
+        img.dataset.cs = 'ok';
+        img.style.removeProperty('opacity');
+        setTimeout(() => URL.revokeObjectURL(u), 5000);
+      });
+      img.onerror = () => finish(() => {
+        URL.revokeObjectURL(u);
+        showCoverProxy(img, vid);
+      });
+      img.src = u;
+    });
+  } catch (e) {
+    if (img.isConnected) showCoverProxy(img, vid);
+  } finally {
+    _releaseCoverSlot();
+  }
 }
 
 // ---------- 登录 / App 免密（AMEND-1）----------

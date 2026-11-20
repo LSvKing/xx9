@@ -9,6 +9,7 @@
     uv run uvicorn server:app --host 0.0.0.0 --port 8000
 """
 import os
+import re
 import json
 import time
 import threading
@@ -39,10 +40,61 @@ db.execute("""CREATE TABLE IF NOT EXISTS history (
     video_id BIGINT PRIMARY KEY, watched_at VARCHAR(32), position INT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
 
+# 标题搜索：90 万行上 LIKE '%q%' 无索引，冷门/无结果会扫全表 20s+ 甚至断连。
+# 用 ngram 全文索引（ft_title）做短语检索，接近原来的「标题包含」语义且毫秒～百毫秒级。
+_FT_OPS = re.compile(r'[+\-><()~*"@]')
+_HAS_FT_TITLE = False
+
+
+def _refresh_ft_flag():
+    global _HAS_FT_TITLE
+    try:
+        _HAS_FT_TITLE = bool(db.query("SHOW INDEX FROM videos WHERE Key_name='ft_title'"))
+    except Exception:
+        _HAS_FT_TITLE = False
+    return _HAS_FT_TITLE
+
+
+def _ensure_ft_title():
+    """缺索引时后台补建（约 1～2 分钟，不阻塞启动）；已有则只刷新标志。"""
+    if _refresh_ft_flag():
+        return
+    try:
+        db.execute("ALTER TABLE videos ADD FULLTEXT INDEX ft_title (title) WITH PARSER ngram")
+    except Exception:
+        pass
+    _refresh_ft_flag()
+
+
+_refresh_ft_flag()
+
+
+def _title_search_clause(q: str):
+    """返回 (sql片段, 参数) 或 None。优先 FULLTEXT 短语；无索引/清洗后为空则退回 LIKE。"""
+    q = (q or "").strip()
+    if not q:
+        return None
+    cleaned = _FT_OPS.sub(" ", q)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    if _HAS_FT_TITLE:
+        terms = [t for t in cleaned.split(" ") if t]
+        if not terms:
+            return None
+        # 多词：每个词都要命中（+"词"）；单词：整句短语，贴近旧 LIKE %q%
+        if len(terms) == 1:
+            ft_q = f'"{terms[0]}"'
+        else:
+            ft_q = " ".join(f'+"{t}"' for t in terms)
+        return ("MATCH(v.title) AGAINST(%s IN BOOLEAN MODE)", ft_q)
+    return ("v.title LIKE %s", f"%{cleaned}%")
+
 @asynccontextmanager
 async def _lifespan(_app):
     """启动即在后台把上游相关的缓存跑热（CDN 前缀/图片加密位/分类/首页），
     别让重启后第一个用户在请求里同步等 config/query + 域名探测（实测 ~7s）。"""
+    threading.Thread(target=_ensure_ft_title, daemon=True).start()
     threading.Thread(target=_prewarm, daemon=True).start()
     yield
 
@@ -360,6 +412,9 @@ def _sniff_image_type(data: bytes) -> str:
 # 封面解密结果短缓存（vid -> (bytes, mime, t)），减轻重复拉 CDN
 _cover_cache: dict = {}
 _COVER_TTL = 3600
+# 同一 vid 并发只拉一次 CDN（搜索页一屏多卡同时 fallback 代理时避免惊群）
+_cover_inflight: dict = {}
+_cover_inflight_guard = threading.Lock()
 
 
 # ============================================================
@@ -367,7 +422,8 @@ _COVER_TTL = 3600
 # ============================================================
 @app.get("/api/me")
 async def me(request: Request):
-    return {"auth": bool(request.session.get("auth")), "img_secret": img_secret()}
+    # auth_open 时 Web 前端靠 /api/me.auth 跳过登录门
+    return {"auth": bool(request.session.get("auth")) or _auth_open(), "img_secret": img_secret()}
 
 
 @app.post("/api/login")
@@ -416,16 +472,12 @@ def _fetch_cover(path: str) -> bytes:
     return resp.content
 
 
-@app.get("/api/cover/{vid}")
-def cover_proxy(vid: int):
+def _load_cover_bytes(vid: int):
+    """拉 CDN + 解密；命中缓存直接返回。(bytes, mime)"""
     now_t = time.time()
     hit = _cover_cache.get(vid)
     if hit and now_t - hit[2] < _COVER_TTL:
-        return Response(
-            content=hit[0],
-            media_type=hit[1],
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
+        return hit[0], hit[1]
 
     rows = db.query("SELECT vodPic FROM videos WHERE id=%s", (vid,))
     if not rows or not (rows[0].get("vodPic") or "").strip():
@@ -443,11 +495,67 @@ def cover_proxy(vid: int):
 
     out = decrypt_cover_bytes(raw)
     mime = _sniff_image_type(out)
-    _cover_cache[vid] = (out, mime, now_t)
+    _cover_cache[vid] = (out, mime, time.time())
     # 简单限大小，防内存涨
     if len(_cover_cache) > 500:
         for k in list(_cover_cache.keys())[:100]:
             _cover_cache.pop(k, None)
+    return out, mime
+
+
+@app.get("/api/cover/{vid}")
+def cover_proxy(vid: int):
+    now_t = time.time()
+    hit = _cover_cache.get(vid)
+    if hit and now_t - hit[2] < _COVER_TTL:
+        return Response(
+            content=hit[0],
+            media_type=hit[1],
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # single-flight：同一 vid 并发只跑一次拉图
+    with _cover_inflight_guard:
+        ev = _cover_inflight.get(vid)
+        if ev is None:
+            ev = threading.Event()
+            _cover_inflight[vid] = ev
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        ev.wait(timeout=30)
+        hit = _cover_cache.get(vid)
+        if hit:
+            return Response(
+                content=hit[0],
+                media_type=hit[1],
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+        # 前一个失败了，自己再试
+        try:
+            out, mime = _load_cover_bytes(vid)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(502, f"封面拉取失败: {e}") from e
+        return Response(
+            content=out,
+            media_type=mime,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    try:
+        out, mime = _load_cover_bytes(vid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"封面拉取失败: {e}") from e
+    finally:
+        with _cover_inflight_guard:
+            _cover_inflight.pop(vid, None)
+        ev.set()
+
     return Response(
         content=out,
         media_type=mime,
@@ -470,8 +578,9 @@ def list_videos(q: str = "", tag: str = "", group: int = 0, theme: int = 0, sort
     page_size = min(max(page_size, 1), 100)
     where = []
     params = []
-    if q:
-        where.append("v.title LIKE %s"); params.append(f"%{q}%")
+    ts = _title_search_clause(q)
+    if ts:
+        where.append(ts[0]); params.append(ts[1])
     if tag:
         where.append("JSON_CONTAINS(v.tags, %s)"); params.append(json.dumps(tag, ensure_ascii=False))
     if group:
