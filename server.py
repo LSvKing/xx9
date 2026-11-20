@@ -537,10 +537,70 @@ def video_detail(vid: int, _=Depends(require_auth)):
         "duration": v["duration"], "author": v["author"],
         "readNumber": v["readNumber"], "likeNumber": v["likeNumber"],
         "createTime": v["createTime"],
+        "comments": v.get("comments"),
         "lines": lines,
         "sources": [lines[0]["url"]] if lines else [],   # 兼容旧前端
         "fav": fav,
     }
+
+
+# ============================================================
+# 评论（代理上游 cms/vod/comment/list；app 端分页 + 回复展开）
+# ============================================================
+def _norm_comment_entry(e: dict) -> dict:
+    """上游 {comment,account,likeNum,childNum,lower[]} → 扁平结构。
+    顶层列表项与 lower[] 子评论项共用（子项 comment.pid 指向父评论）。"""
+    c = e.get("comment") or {}
+    acc = e.get("account") or {}
+    avatar = acc.get("avatar") or ""
+    return {
+        "id": c.get("id"),
+        "pid": c.get("pid"),
+        "content": c.get("content") or "",
+        "createTime": c.get("createTime"),
+        "likeNum": e.get("likeNum") or 0,
+        "childNum": e.get("childNum") or 0,
+        "author": acc.get("nickName") or "",
+        "avatar": pic_url(avatar) if avatar else None,
+    }
+
+
+@app.get("/api/video/{vid}/comments")
+def video_comments(vid: int, page: int = 1, page_size: int = 12, _=Depends(require_auth)):
+    """顶层评论分页。上游 {vid,page,pageSize} → data[{comment,account,likeNum,childNum}]。"""
+    page = max(1, page)
+    page_size = min(max(page_size, 1), 50)
+    try:
+        r = c.api_call("cms/vod/comment/list", method=2,
+                       params={"vid": vid, "page": page, "pageSize": page_size},
+                       timeout=10, use_proxy=False)
+    except Exception:
+        raise HTTPException(502, "上游评论接口不可用")
+    data = r.get("data") or []
+    items = [_norm_comment_entry(e) for e in data]
+    total = int(r.get("total") or 0)
+    return {"page": page, "page_size": page_size, "total": total,
+            "items": items, "has_more": page * page_size < total}
+
+
+@app.get("/api/video/{vid}/comments/{cid}/replies")
+def comment_replies(vid: int, cid: int, page: int = 1, page_size: int = 12, _=Depends(require_auth)):
+    """某条评论的子回复。上游 {vid,pid,page,pageSize} → data[0].lower[{comment,account,likeNum}]。"""
+    page = max(1, page)
+    page_size = min(max(page_size, 1), 50)
+    try:
+        r = c.api_call("cms/vod/comment/list", method=2,
+                       params={"vid": vid, "pid": cid, "page": page, "pageSize": page_size},
+                       timeout=10, use_proxy=False)
+    except Exception:
+        raise HTTPException(502, "上游评论接口不可用")
+    items = []
+    for e in r.get("data") or []:
+        for low in e.get("lower") or []:
+            items.append(_norm_comment_entry(low))
+    total = int(r.get("total") or 0)
+    return {"page": page, "page_size": page_size, "total": total,
+            "items": items, "has_more": page * page_size < total}
 
 
 # ============================================================

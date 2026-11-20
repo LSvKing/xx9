@@ -476,6 +476,9 @@ fun PlayerScreen(
                             Spacer(Modifier.height(8.dp))
                             Text("点「投屏」选择同一 Wi‑Fi 下的电视 / 盒子 (DLNA)", color = Mut, fontSize = 12.sp)
                         }
+                        if (!casting) {
+                            CommentsSection(api, videoId, detail?.comments)
+                        }
                     }
 
                     if (casting) {

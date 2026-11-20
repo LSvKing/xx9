@@ -22,6 +22,7 @@ data class VideoDetail(
     val lines: List<PlayLine>,
     val fav: Boolean,
     val tags: List<String>,
+    val comments: Int?,
 )
 
 data class HomeBlock(
@@ -29,6 +30,25 @@ data class HomeBlock(
     val title: String,
     val source: String?,
     val items: List<VideoItem>,
+)
+
+data class CommentItem(
+    val id: Long,
+    val pid: Long?,
+    val content: String,
+    val createTime: Long?,
+    val likeNum: Int,
+    val childNum: Int,
+    val author: String,
+    val avatar: String?,
+)
+
+data class CommentPage(
+    val page: Int,
+    val pageSize: Int,
+    val total: Int,
+    val items: List<CommentItem>,
+    val hasMore: Boolean,
 )
 
 data class GroupItem(val id: Int, val name: String)

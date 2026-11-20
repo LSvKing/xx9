@@ -181,6 +181,63 @@ class Xx9Api(private val baseUrlProvider: () -> String) {
             lines = lines,
             fav = o.optBoolean("fav", false),
             tags = tags,
+            comments = o.optInt("comments").takeIf { o.has("comments") },
+        )
+    }
+
+    suspend fun comments(vid: Int, page: Int = 1, pageSize: Int = 12): CommentPage =
+        withContext(Dispatchers.IO) {
+            ensureSession()
+            val url = base().toHttpUrl().newBuilder()
+                .addPathSegments("api/video/$vid/comments")
+                .addQueryParameter("page", page.toString())
+                .addQueryParameter("page_size", pageSize.toString())
+                .build()
+            val o = JSONObject(execute(
+                Request.Builder().url(url).header("X-XX9-App", "1")
+                    .header("Accept", "application/json").get()))
+            parseCommentPage(o, page, pageSize)
+        }
+
+    suspend fun commentReplies(vid: Int, cid: Long, page: Int = 1, pageSize: Int = 12): CommentPage =
+        withContext(Dispatchers.IO) {
+            ensureSession()
+            val url = base().toHttpUrl().newBuilder()
+                .addPathSegments("api/video/$vid/comments/$cid/replies")
+                .addQueryParameter("page", page.toString())
+                .addQueryParameter("page_size", pageSize.toString())
+                .build()
+            val o = JSONObject(execute(
+                Request.Builder().url(url).header("X-XX9-App", "1")
+                    .header("Accept", "application/json").get()))
+            parseCommentPage(o, page, pageSize)
+        }
+
+    private fun parseCommentPage(o: JSONObject, page: Int, pageSize: Int): CommentPage {
+        val arr = o.optJSONArray("items") ?: JSONArray()
+        val items = buildList {
+            for (i in 0 until arr.length()) {
+                val c = arr.getJSONObject(i)
+                add(
+                    CommentItem(
+                        id = c.optLong("id"),
+                        pid = c.optLong("pid").takeIf { c.has("pid") && !c.isNull("pid") && it > 0 },
+                        content = c.optString("content"),
+                        createTime = c.optLong("createTime", 0).takeIf { it > 0 },
+                        likeNum = c.optInt("likeNum", 0),
+                        childNum = c.optInt("childNum", 0),
+                        author = c.optString("author"),
+                        avatar = c.optString("avatar").takeIf { it.isNotBlank() },
+                    ),
+                )
+            }
+        }
+        return CommentPage(
+            page = o.optInt("page", page),
+            pageSize = o.optInt("page_size", pageSize),
+            total = o.optInt("total", 0),
+            items = items,
+            hasMore = o.optBoolean("has_more", false),
         )
     }
 
