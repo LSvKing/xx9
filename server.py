@@ -656,23 +656,6 @@ def video_detail(vid: int, _=Depends(require_auth)):
 # ============================================================
 # 评论（代理上游 cms/vod/comment/list；app 端分页 + 回复展开）
 # ============================================================
-_comments_cache = {}        # (kind, vid, cid, page, page_size) -> (payload, ts)
-_COMMENTS_TTL = 600         # 评论更新慢：10min 缓存，避免每次详情页都排 15s pace 队
-
-
-def _comments_cached(key, fetch):
-    now_t = time.time()
-    hit = _comments_cache.get(key)
-    if hit and now_t - hit[1] < _COMMENTS_TTL:
-        return hit[0]
-    payload = fetch()
-    if payload is not None:
-        _comments_cache[key] = (payload, now_t)
-        if len(_comments_cache) > 2000:                       # 简单防胀：整表清一轮
-            _comments_cache.clear()
-    return payload
-
-
 def _norm_comment_entry(e: dict) -> dict:
     """上游 {comment,account,likeNum,childNum,lower[]} → 扁平结构。
     顶层列表项与 lower[] 子评论项共用（子项 comment.pid 指向父评论）。"""
@@ -696,24 +679,18 @@ def video_comments(vid: int, page: int = 1, page_size: int = 12, _=Depends(requi
     """顶层评论分页。上游 {vid,page,pageSize} → data[{comment,account,likeNum,childNum}]。"""
     page = max(1, page)
     page_size = min(max(page_size, 1), 50)
-
-    def _fetch():
-        try:
-            r = c.api_call("cms/vod/comment/list", method=2,
-                           params={"vid": vid, "page": page, "pageSize": page_size},
-                           timeout=10, use_proxy=False)
-        except Exception:
-            return None
-        data = r.get("data") or []
-        items = [_norm_comment_entry(e) for e in data]
-        total = int(r.get("total") or 0)
-        return {"page": page, "page_size": page_size, "total": total,
-                "items": items, "has_more": page * page_size < total}
-
-    out = _comments_cached(("c", vid, 0, page, page_size), _fetch)
-    if out is None:
+    try:
+        # pace=False：用户交互级调用，不占 15s 共享限速队（详情页不被评论拖慢）
+        r = c.api_call("cms/vod/comment/list", method=2,
+                       params={"vid": vid, "page": page, "pageSize": page_size},
+                       timeout=10, use_proxy=False, pace=False)
+    except Exception:
         raise HTTPException(502, "上游评论接口不可用")
-    return out
+    data = r.get("data") or []
+    items = [_norm_comment_entry(e) for e in data]
+    total = int(r.get("total") or 0)
+    return {"page": page, "page_size": page_size, "total": total,
+            "items": items, "has_more": page * page_size < total}
 
 
 @app.get("/api/video/{vid}/comments/{cid}/replies")
@@ -721,26 +698,19 @@ def comment_replies(vid: int, cid: int, page: int = 1, page_size: int = 12, _=De
     """某条评论的子回复。上游 {vid,pid,page,pageSize} → data[0].lower[{comment,account,likeNum}]。"""
     page = max(1, page)
     page_size = min(max(page_size, 1), 50)
-
-    def _fetch():
-        try:
-            r = c.api_call("cms/vod/comment/list", method=2,
-                           params={"vid": vid, "pid": cid, "page": page, "pageSize": page_size},
-                           timeout=10, use_proxy=False)
-        except Exception:
-            return None
-        items = []
-        for e in r.get("data") or []:
-            for low in e.get("lower") or []:
-                items.append(_norm_comment_entry(low))
-        total = int(r.get("total") or 0)
-        return {"page": page, "page_size": page_size, "total": total,
-                "items": items, "has_more": page * page_size < total}
-
-    out = _comments_cached(("r", vid, cid, page, page_size), _fetch)
-    if out is None:
+    try:
+        r = c.api_call("cms/vod/comment/list", method=2,
+                       params={"vid": vid, "pid": cid, "page": page, "pageSize": page_size},
+                       timeout=10, use_proxy=False, pace=False)
+    except Exception:
         raise HTTPException(502, "上游评论接口不可用")
-    return out
+    items = []
+    for e in r.get("data") or []:
+        for low in e.get("lower") or []:
+            items.append(_norm_comment_entry(low))
+    total = int(r.get("total") or 0)
+    return {"page": page, "page_size": page_size, "total": total,
+            "items": items, "has_more": page * page_size < total}
 
 
 # ============================================================

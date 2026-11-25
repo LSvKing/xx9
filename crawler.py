@@ -377,13 +377,16 @@ def aes_dec_auto(b64: str, hint: int = None) -> bytes:
 
 
 def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
-             use_proxy: bool = None, _retried: bool = False) -> dict:
+             use_proxy: bool = None, _retried: bool = False, pace: bool = True) -> dict:
     """use_proxy: None=跟随全局 USE_PROXY；True/False=本次强制。
+    pace=False 跳过 15s 共享限速 —— 只给用户交互级低频调用（评论等）用：
+    它们按人手速自然限速，不该跟回填/刷新区抢同一条队、互相拖慢。
     高频回填走代理轮换绕 WAF；低频的播放取地址传 False 走本机真实 IP，
     独享、不跟回填挤在同一个被限速的住宅 IP 上。
     解出 code 1034（JwtToken 过期）或 1019（Token 过期）时自动热重载凭证并重试一次——
     server.py 长驻进程、批量爬取中途都能据此自愈，不必重启/不必等下一轮 fetch_creds。"""
-    protocol_pace()
+    if pace:
+        protocol_pace()
     ts = int(time.time() * 1000)
     key = KEYS[ts % 10]
     bp = json.dumps({"method": method, "params": params or {}, "uri": uri}, separators=(",", ":"))
@@ -412,7 +415,7 @@ def api_call(uri: str, method: int = 1, params: dict = None, timeout: int = 30,
             if not reloaded:
                 time.sleep(0.5)
             print(f"  [creds] API code={code} {res.get('message') or res.get('msg') or ''} → 热重载凭证重试", flush=True)
-            return api_call(uri, method, params, timeout, use_proxy, _retried=True)
+            return api_call(uri, method, params, timeout, use_proxy, _retried=True, pace=pace)
         raise Exception(f"Token过期 code={code}")
     if code == "1062":
         # 超过限制（频控），不是已删除；抛错让上层退避重试，切勿当空洞
