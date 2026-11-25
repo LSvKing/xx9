@@ -77,7 +77,12 @@ fun CommentsSection(api: Xx9Api, videoId: Int, dbCommentCount: Int?) {
     var failed by remember { mutableStateOf(false) }
     var showAll by remember { mutableStateOf(false) }
 
-    LaunchedEffect(videoId) {
+    LaunchedEffect(videoId, dbCommentCount) {
+        // DB 计数为 0 → 上游必然空：直接短路，不为空评论区占 pace 队（详情提速）
+        if (dbCommentCount != null && dbCommentCount <= 0) {
+            items = emptyList(); total = 0; loading = false; failed = false
+            return@LaunchedEffect
+        }
         loading = true
         failed = false
         runCatching { api.comments(videoId, page = 1, pageSize = PAGE_SIZE) }
