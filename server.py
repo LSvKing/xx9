@@ -269,8 +269,10 @@ _play_inflight = {}                  # vid -> Event：同一 vid 并发只打一
 
 
 def _detail_addr(vid: int, use_proxy):
-    """打一次 detail 接口，取第一条有 addr 的播放线路。失败抛异常。"""
-    d = c.api_call(f"cms/vod/detail/{vid}", method=1, timeout=12, use_proxy=use_proxy)
+    """打一次 detail 接口，取第一条有 addr 的播放线路。失败抛异常。
+    pace=False：这是用户开详情页的交互路径（官方 app 同款频率），
+    不应跟 crawler 批量刷新/定时任务抢 15s 共享限速队 —— 否则详情页卡 15s+。"""
+    d = c.api_call(f"cms/vod/detail/{vid}", method=1, timeout=12, use_proxy=use_proxy, pace=False)
     play = (d.get("result") or {}).get("vod", {}).get("vodFullPlayUrl") or []
     if isinstance(play, str):
         play = [{"addr": play}]
